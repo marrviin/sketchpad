@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+/* Looseleaf paper theme: tokens, keyframes, ll-* utilities and Kevin Sans @font-face.
+   The Sketchpad component (and the ink engine it renders with) reads these tokens. */
+@import "./looseleaf.css";
+
+/* 手写风文本标注字体（霞鹜文楷 Lite，OFL）：画板 texts 元素渲染用，
+   与 sketchpad snapshot 渲染器（src/render.ts）共用包根 fonts/ 下同一 TTF，两端一致 */
+@font-face {
+  font-family: "LXGW WenKai Lite";
+  src: url("../../fonts/LXGWWenKaiLite-Regular.ttf") format("truetype");
+  font-display: swap;
+}
+
+/* 页面底色：冷灰；画板平面本身用纸色（Sketchpad 组件内） */
+body {
+  background: #f6f8fa;
+}
