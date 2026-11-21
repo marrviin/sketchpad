@@ -9,7 +9,7 @@
 ## 安装与使用
 
 ```bash
-npm i -g sketchpad
+npm i -g @content-forge/sketchpad
 sketchpad ui    # 打开（或拉起）画板服务并打印页面地址
 ```
 

@@ -1,5 +1,5 @@
 {
-  "name": "sketchpad",
+  "name": "@content-forge/sketchpad",
   "version": "0.1.0",
   "description": "手绘板：looseleaf Sketchpad 画板（手绘风页面 + REST/SSE 后端 + CLI），agent 与人双向同步作画",
   "license": "MIT",
@@ -47,8 +47,8 @@
     }
   },
   "devDependencies": {
-    "@content-forge/daemon": "file:../content-forge/packages/daemon",
-    "@content-forge/ink": "file:../content-forge/packages/ink",
+    "@content-forge/daemon": "^0.1.0",
+    "@content-forge/ink": "^0.1.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^24.19.2",
     "@types/react": "^19.3.0",
