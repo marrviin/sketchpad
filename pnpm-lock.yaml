@@ -19,11 +19,11 @@ importers:
         version: 3.25.76
     devDependencies:
       '@content-forge/daemon':
-        specifier: file:../content-forge/packages/daemon
-        version: file:../content-forge/packages/daemon
+        specifier: ^0.1.0
+        version: 0.1.0
       '@content-forge/ink':
-        specifier: file:../content-forge/packages/ink
-        version: file:../content-forge/packages/ink(react@19.3.1)
+        specifier: ^0.1.0
+        version: 0.1.0(react@19.3.1)
       '@tailwindcss/vite':
         specifier: ^4.3.3
         version: 4.3.5(vite@8.3.8(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
@@ -78,13 +78,13 @@ importers:
 
 packages:
 
-  '@content-forge/daemon@file:../content-forge/packages/daemon':
-    resolution: {directory: ../content-forge/packages/daemon, type: directory}
+  '@content-forge/daemon@0.1.0':
+    resolution: {integrity: sha512-MAqOHvNVpasTVgjU4zrNVElcr7nbUl3t1MMVcJbJk1hNDAhyDIpneGXyhNsl4QG0/vD/v0qWVXO4lf0Qf/rsBg==}
     engines: {node: '>=20'}
     hasBin: true
 
-  '@content-forge/ink@file:../content-forge/packages/ink':
-    resolution: {directory: ../content-forge/packages/ink, type: directory}
+  '@content-forge/ink@0.1.0':
+    resolution: {integrity: sha512-s8moRizR67gb+liZhxmOlDJVetsdghXmFSeQlP6rAcf5x6Wfjl/GagWOZ/4jkUwyH7B+vQFt7NE/axQUR3o1Rw==}
     engines: {node: '>=20'}
     peerDependencies:
       react: '>=18'
@@ -1633,11 +1633,11 @@ packages:
 
 snapshots:
 
-  '@content-forge/daemon@file:../content-forge/packages/daemon':
+  '@content-forge/daemon@0.1.0':
     dependencies:
       commander: 14.0.3
 
-  '@content-forge/ink@file:../content-forge/packages/ink(react@19.3.1)':
+  '@content-forge/ink@0.1.0(react@19.3.1)':
     dependencies:
       react: 19.3.1
 

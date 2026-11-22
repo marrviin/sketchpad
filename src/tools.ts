@@ -6,13 +6,13 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { COLOR_LABEL, DRAW_TOOLS, SKETCH_COLORS, SKETCH_SIZES, SKETCH_TOOLS, TOOL_LABEL, type SketchColor, type SketchStroke, type SketchText } from "./contract.js";
+import { COLOR_LABEL, DRAW_TOOLS, SKETCH_COLORS, SKETCH_SIZES, SKETCH_TOOLS, STENCIL_KINDS, TOOL_LABEL, type SketchColor, type SketchStroke, type SketchText } from "./contract.js";
 import { renderDocSvg, resolveFontFile, FONT_FAMILY, TOOL_STYLE } from "./render.js";
 import { projectRoot } from "./paths.js";
 import { sketchpadApi, sketchpadUrl, ensureSketchpadRoute } from "./route.js";
 
 /** 快照渲染只需要文档形状（与 backend 的 CanvasDoc 同形），避免拉入完整文档模块 */
-type CanvasDocShape = { rev: number; width: number; height: number; strokes: SketchStroke[]; texts: SketchText[] };
+type CanvasDocShape = { rev: number; width: number; height: number; strokes: SketchStroke[]; texts: SketchText[]; icons?: { id: string; name: string; x: number; y: number; size: number; color: SketchColor }[] };
 
 /** 内容包围盒 ∪ 首页画框，四周 pad——首页框内内容取景与固定画布一致，框外内容自动扩进来 */
 function contentBBox(doc: CanvasDocShape): { x0: number; y0: number; w: number; h: number } {
@@ -35,6 +35,12 @@ function contentBBox(doc: CanvasDocShape): { x0: number; y0: number; w: number; 
     y0 = Math.min(y0, t.y);
     x1 = Math.max(x1, t.x + t.text.length * t.size * 1.05);
     y1 = Math.max(y1, t.y + t.size);
+  }
+  for (const ic of doc.icons ?? []) {
+    x0 = Math.min(x0, ic.x);
+    y0 = Math.min(y0, ic.y);
+    x1 = Math.max(x1, ic.x + ic.size);
+    y1 = Math.max(y1, ic.y + ic.size);
   }
   const PAD = 24;
   return {
@@ -120,6 +126,10 @@ const ShapeList = z
       z.object({ shape: z.literal("spline"), points: z.array(Pt).min(3).max(500), tool: z.enum(DRAW_TOOLS).optional(), color: z.enum(SKETCH_COLORS).optional(), size: makeSizeInput().optional() }),
       z.object({ shape: z.literal("hatch"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), angleDeg: z.number().optional(), gap: z.number().optional(), tool: z.enum(DRAW_TOOLS).optional(), color: z.enum(SKETCH_COLORS).optional(), size: makeSizeInput().optional() }),
       z.object({ shape: z.literal("text"), x: z.number(), y: z.number(), text: z.string().min(1).max(200), size: z.number().min(8).max(200).optional(), color: z.enum(SKETCH_COLORS).optional(), tool: z.enum(SKETCH_TOOLS).optional() }),
+      // 复合符号 stencil：服务端按 kind 展开成一组笔迹（只产笔迹，label 自己用 text 标）
+      z.object({ shape: z.literal("stencil"), kind: z.enum(STENCIL_KINDS), x: z.number(), y: z.number(), w: z.number(), h: z.number().optional(), units: z.number().int().min(1).max(8).optional(), tool: z.enum(DRAW_TOOLS).optional(), color: z.enum(SKETCH_COLORS).optional(), size: makeSizeInput().optional() }),
+      // icon：直接用 looseleaf 真实 icon（name 见 looseleaf icons 库），后端渲染成笔迹
+      z.object({ shape: z.literal("icon"), name: z.string().min(1).max(40), x: z.number(), y: z.number(), size: z.number().min(8).max(120).optional(), tool: z.enum(DRAW_TOOLS).optional(), color: z.enum(SKETCH_COLORS).optional() }),
     ]),
   )
   .min(1)
@@ -138,8 +148,9 @@ export function sketchpadToolDefs(): ToolDef[] {
       inputSchema: {
         canvas: makeCanvasInput(),
         full: z.boolean().optional().describe("是否附带完整笔迹 JSON"),
+        ids: z.boolean().optional().describe("是否附带元素清单（id · 类型 · 摘要，配合 sketchpad_erase 局部修正）"),
       },
-      handler: async ({ canvas, full }) => {
+      handler: async ({ canvas, full, ids }) => {
         try {
           const list = await sketchpadApi<{ canvases: { id: string; updatedAt: string; strokes: number }[]; active: string }>(
             "/canvases",
@@ -159,6 +170,21 @@ export function sketchpadToolDefs(): ToolDef[] {
             list.canvases.length > 8 ? `  … 共 ${list.canvases.length} 块` : "",
           ].filter(Boolean);
           if (full) lines.push("", JSON.stringify(doc.strokes, null, 2));
+          if (ids) {
+            lines.push("", "元素清单（id · 类型 · 摘要；配合 sketchpad_erase 做局部修正）：");
+            for (const t of doc.texts as SketchText[])
+              lines.push(`  ${t.id} → text "${t.text.slice(0, 30)}" @${t.x},${t.y}`);
+            for (const ic of (doc.icons ?? []) as { id: string; name: string; x: number; y: number; size: number }[])
+              lines.push(`  ${ic.id} → icon "${ic.name}" @${ic.x},${ic.y} size=${ic.size}`);
+            for (const s of doc.strokes as SketchStroke[])
+              lines.push(`  ${s.id} → ${s.tool}/${s.color} ×${s.pts.length}点 @${Math.round(s.pts[0]?.[0] ?? 0)},${Math.round(s.pts[0]?.[1] ?? 0)}`);
+            const groups = (doc.groups ?? []) as { name: string; strokeIds: string[]; textIds: string[]; iconIds?: string[] }[];
+            if (groups.length) {
+              lines.push("", "语义分组（按名擦/按名改：sketchpad erase {name}）：");
+              for (const g of groups)
+                lines.push(`  「${g.name}」${g.strokeIds.length} 笔迹 + ${g.textIds.length} 文本${g.iconIds?.length ? ` + ${g.iconIds.length} icon` : ""}`);
+            }
+          }
           lines.push("", "并发作画请先 sketchpad_new_canvas 各自建画布，之后所有工具带上 canvas id。");
           return textResult(lines.join("\n"));
         } catch (e) {
@@ -236,16 +262,20 @@ export function sketchpadToolDefs(): ToolDef[] {
         "arrow 箭头 {from,to,head?}（三笔：主体线+两条头部短线）；dash 虚线 {from,to}（多笔分段）；\n" +
         "hatch 区域排线填充 {x,y,w,h,angleDeg?,gap?}（手绘涂阴影，多笔）；\n" +
         "text 手写风文本 {x,y,text,size?(字号px,默认画布宽 2.8%),color?}（x,y 是文字左上角）。\n" +
-        "自由曲线优先 spline，精确单段曲线用 bezier。",
+        "自由曲线优先 spline，精确单段曲线用 bezier。\n" +
+        "stencil 复合符号 {shape:\"stencil\", kind, x,y,w, h?, units?}：服务端展开成一组笔迹，手画易错的抽象符号直接用它——" +
+        "kind: phone=手机框(原型) / browser=浏览器窗(原型) / db=数据库圆柱(架构) / server=服务器机架(架构，units=机架单元数) / " +
+        "cloud=外部系统云 / actor=小人(用例图) / group=虚线分组边界(子系统)。h 缺省按 kind 标准比例自动补；stencil 只产笔迹，名称标注随后单独发 text。",
       inputSchema: {
         shapes: ShapeList,
         unit: z.enum(["px", "norm"]).optional().describe("坐标单位：px = 画布像素（默认）；norm = 0~1 归一化相对画布宽高"),
         tool: z.enum(DRAW_TOOLS).optional().describe("本批形状的默认画笔（覆盖画板当前默认）"),
         color: z.enum(SKETCH_COLORS).optional().describe("本批形状的默认颜色"),
         size: makeSizeInput().optional().describe("本批形状的默认粗细"),
+        group: z.string().min(1).max(40).optional().describe("语义分组名：这批形状归入该组，以后可用 erase {name} 整组擦掉重画。如 \"数据库\" \"登录按钮\" \"主标题\""),
         canvas: makeCanvasInput(),
       },
-      handler: async ({ shapes, unit, tool, color, size, canvas }) => {
+      handler: async ({ shapes, unit, tool, color, size, group, canvas }) => {
         try {
           // 调用层点为 {x,y} 对象（网关兼容），backend 契约是 [x,y] tuple——这里转回
           const backendShapes = shapes.map((s: ShapeInput) => {
@@ -265,13 +295,22 @@ export function sketchpadToolDefs(): ToolDef[] {
                 return s;
             }
           });
-          const r = await sketchpadApi<{ id: string; rev: number; added: number; texts: number; strokes: number; clamped: number }>(canvasPath(canvas, "draw"), {
+          const r = await sketchpadApi<{ id: string; rev: number; added: number; texts: number; icons: number; strokes: number; clamped: number; strokeIds: string[]; textIds: string[]; iconIds: string[] }>(canvasPath(canvas, "draw"), {
             method: "POST",
-            body: JSON.stringify({ shapes: backendShapes, unit, tool, color, size }),
+            body: JSON.stringify({ shapes: backendShapes, unit, tool, color, size, group }),
           });
           const warn = r.clamped > 0 ? `（${r.clamped} 个点越界已钳回画布边缘）` : "";
           const tinfo = r.texts ? `，其中 ${r.texts} 条文本` : "";
-          return textResult(`画布 ${r.id} 已落笔 ${r.added}${tinfo}${warn}，现有 ${r.strokes} 笔迹。用 sketchpad_snapshot 渲染 PNG 自查画面。`);
+          const iinfo = r.icons ? `、${r.icons} 个 looseleaf icon` : "";
+          const allIds = [...r.textIds, ...r.iconIds, ...r.strokeIds];
+          const idHint = allIds.length === 0
+            ? ""
+            : allIds.length <= 12
+              ? ` 本批元素 id：${allIds.join(" ")}（画错可 sketchpad_erase 按 id 删）。`
+              : ` 本批 ${allIds.length} 个元素（清单用 sketchpad_get_state ids=true 查，画错可 sketchpad_erase 按 id 删）。`;
+          return textResult(
+            `画布 ${r.id} 已落笔 ${r.added}${tinfo}${iinfo}${warn}，现有 ${r.strokes} 笔迹。${idHint}用 sketchpad_snapshot 渲染 PNG 自查画面。`,
+          );
         } catch (e) {
           return textResult(`绘制失败：${(e as Error).message}`, true);
         }
@@ -353,7 +392,7 @@ export function sketchpadToolDefs(): ToolDef[] {
         try {
           const { Resvg } = await import("@resvg/resvg-js");
           const { doc, id } = await sketchpadApi<{ id: string; doc: CanvasDocShape }>(canvasPath(canvas, "doc"));
-          if (!doc.strokes.length && !doc.texts.length) {
+          if (!doc.strokes.length && !doc.texts.length && !doc.icons?.length) {
             return textResult(`画布 ${id} 是空的，没有可渲染的内容（rev ${doc.rev}）。`);
           }
           const reg = region
@@ -374,7 +413,7 @@ export function sketchpadToolDefs(): ToolDef[] {
           return textResult(
             `画布 ${id} 快照已渲染：${file}\n` +
               `（取景 ${Math.round(reg.x0)},${Math.round(reg.y0)} – ${Math.round(reg.x0 + reg.w)},${Math.round(reg.y0 + reg.h)} · ` +
-              `${Math.round(reg.w)}×${Math.round(reg.h)} · ${doc.strokes.length} 笔迹 + ${doc.texts.length} 条文本 · rev ${doc.rev}；输出宽 ${width}px）\n` +
+              `${Math.round(reg.w)}×${Math.round(reg.h)} · ${doc.strokes.length} 笔迹 + ${doc.texts.length} 条文本${doc.icons?.length ? ` + ${doc.icons.length} icon` : ""} · rev ${doc.rev}；输出宽 ${width}px）\n` +
               `下一步：用 Read 工具查看该 PNG 自查；不像就 sketchpad_undo 撤掉重画，像了再继续。`,
           );
         } catch (e) {
@@ -415,6 +454,63 @@ export function sketchpadToolDefs(): ToolDef[] {
           return textResult(r.redone ? `画布 ${r.id} 已重做 ${r.redone} 次变更，现有 ${r.strokes} 笔迹（rev ${r.rev}）。` : `画布 ${r.id} 没有可重做的变更。`);
         } catch (e) {
           return textResult(`重做失败：${(e as Error).message}`, true);
+        }
+      },
+    },
+
+    {
+      name: "sketchpad_erase",
+      title: "按元素删除",
+      description:
+        "按元素 id 删除笔迹/文本，做局部修正——undo 的粒度是整次 draw 调用，撤掉单个画错的元素用它。" +
+        "元素 id 从 sketchpad_draw 的返回（strokeIds/textIds）或 sketchpad_get_state 的 ids=true 元素清单里拿。" +
+        "删除会进撤销栈，sketchpad_undo 可恢复。",
+      inputSchema: {
+        canvas: makeCanvasInput(),
+        ids: z.array(z.string().min(1)).max(2000).optional().describe("要删除的元素 id 列表（笔迹/文本 id 混合均可）"),
+        name: z.string().min(1).max(40).optional().describe("按语义组名整组删除——擦掉该组全部笔迹+文本。用于精准修改：用户说\"数据库改大点\"时，先 erase {name:\"数据库\"} 再重画"),
+      },
+      handler: async ({ canvas, ids, name }) => {
+        try {
+          const r = await sketchpadApi<{ id: string; rev: number; removedStrokes: number; removedTexts: number; removedIcons: number; groupFound: boolean; strokes: number; texts: number }>(
+            canvasPath(canvas, "remove"),
+            { method: "POST", body: JSON.stringify({ ids, name }) },
+          );
+          const parts = [
+            r.removedStrokes ? `${r.removedStrokes} 笔迹` : "",
+            r.removedTexts ? `${r.removedTexts} 条文本` : "",
+            r.removedIcons ? `${r.removedIcons} 个 icon` : "",
+          ].filter(Boolean);
+          const nameNote = name ? (r.groupFound ? `（组"${name}"）` : `（没找到组"${name}"）`) : "";
+          return textResult(
+            parts.length
+              ? `画布 ${r.id} 已删除 ${parts.join(" + ")}${nameNote}，剩 ${r.strokes} 笔迹 / ${r.texts} 条文本（rev ${r.rev}）；可用 sketchpad_undo 恢复。`
+              : `画布 ${r.id} 没有命中这些元素${nameNote}（rev ${r.rev}）。`,
+          );
+        } catch (e) {
+          return textResult(`删除失败：${(e as Error).message}`, true);
+        }
+      },
+    },
+
+    {
+      name: "sketchpad_use",
+      title: "切换活动画布",
+      description:
+        "把指定画布设为活动画布：之后所有省略 canvas 参数的 sketchpad_* 调用（与页面首开）都落到它。" +
+        "并发作画/回看旧画布继续画时用它；不改变任何画布内容。",
+      inputSchema: {
+        canvas: z.string().regex(/^\d{14}$/).describe("要设为活动画布的画布 id（YYYYMMDDHHmmss，get_state 列表里拿）"),
+      },
+      handler: async ({ canvas }) => {
+        try {
+          const r = await sketchpadApi<{ id: string; active: string }>("/use", {
+            method: "POST",
+            body: JSON.stringify({ id: canvas }),
+          });
+          return textResult(`活动画布已切到 ${r.active}。之后省略 canvas 的 sketchpad_* 调用都落到它。`);
+        } catch (e) {
+          return textResult(`切换失败：${(e as Error).message}`, true);
         }
       },
     },

@@ -1,0 +1,4 @@
+onlyBuiltDependencies:
+  - esbuild
+  - '@resvg/resvg-js'
+  - '@tailwindcss/oxide'

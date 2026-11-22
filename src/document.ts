@@ -7,14 +7,18 @@ import fs, { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path";
 import {
   autoColor,
+  STENCIL_ASPECT,
   type CanvasDoc,
   type DrawTool,
+  type ElementGroup,
   type SketchColor,
+  type SketchIcon,
   type SketchPoint,
   type SketchStroke,
   type SketchText,
   type SketchTool,
   type ShapeSpec,
+  type StencilKind,
 } from "./contract.js";
 
 export const CANVAS_WIDTH = 1040;
@@ -305,6 +309,12 @@ export function normalizeShape(shape: ShapeSpec, width: number, height: number):
     case "text":
       // 位置按 norm 缩放；字号恒为 px（LLM 传 size:30 意图就是 30px，按宽缩放会得到 3 万像素）
       return { ...shape, x: shape.x * width, y: shape.y * height };
+    case "stencil":
+      // x/y 按各自轴，w/h 按宽；h 缺省留给 buildStrokes 用 STENCIL_ASPECT 补
+      return { ...shape, x: shape.x * width, y: shape.y * height, w: shape.w * width, h: shape.h !== undefined ? shape.h * width : undefined };
+    case "icon":
+      // x/y 按各自轴，size 边长按宽缩放
+      return { ...shape, x: shape.x * width, y: shape.y * height, size: shape.size !== undefined ? shape.size * width : undefined };
   }
 }
 
@@ -321,6 +331,114 @@ export function clampPts(pts: SketchPoint[], _width: number, _height: number): n
   return clamped;
 }
 
+/* ===== stencil 复合符号展开 =====
+ * 每个 kind 把一个包围盒 (x,y,w,h,px) 编译成原语 shape 数组（rect/rrect/ellipse/arc/line/spline/dash），
+ * 再走现有采样管线。统一继承 stencil 的 tool/color/size——手绘图本就单色墨线，不做逐元素上色。 */
+
+type Sub = ShapeSpec;
+
+const L = (x1: number, y1: number, x2: number, y2: number): Sub => ({ shape: "line", from: [x1, y1], to: [x2, y2] });
+
+export function stencilBuild(kind: StencilKind, x: number, y: number, w: number, h: number, units = 3): Sub[] {
+  const cx = x + w / 2;
+  switch (kind) {
+    case "phone":
+      return [
+        { shape: "rrect", x, y, w, h, r: w * 0.11 }, // 机身
+        { shape: "rrect", x: cx - w * 0.085, y: y + h * 0.03, w: w * 0.17, h: h * 0.018, r: h * 0.009 }, // 刘海 pill
+        L(cx - w * 0.11, y + h * 0.962, cx + w * 0.11, y + h * 0.962), // home indicator
+        L(x + w, y + h * 0.18, x + w, y + h * 0.27), // 侧边键
+      ];
+    case "browser":
+      return [
+        { shape: "rect", x, y, w, h }, // 窗口
+        L(x, y + h * 0.15, x + w, y + h * 0.15), // 标题栏分隔线
+        // 三圆点（红绿灯）
+        { shape: "ellipse", cx: x + w * 0.05, cy: y + h * 0.075, rx: w * 0.012, ry: h * 0.032 },
+        { shape: "ellipse", cx: x + w * 0.095, cy: y + h * 0.075, rx: w * 0.012, ry: h * 0.032 },
+        { shape: "ellipse", cx: x + w * 0.14, cy: y + h * 0.075, rx: w * 0.012, ry: h * 0.032 },
+        // 地址栏
+        { shape: "rrect", x: x + w * 0.2, y: y + h * 0.045, w: w * 0.75, h: h * 0.062, r: h * 0.031 },
+      ];
+    case "db":
+      return [
+        { shape: "ellipse", cx, cy: y + h * 0.13, rx: w / 2, ry: h * 0.13 }, // 顶椭圆
+        L(x, y + h * 0.13, x, y + h * 0.9), // 左侧壁
+        L(x + w, y + h * 0.13, x + w, y + h * 0.9), // 右侧壁
+        // 底部前 rim（下半个椭圆，180°→360° 顺时针过底）
+        { shape: "arc", cx, cy: y + h * 0.9, rx: w / 2, ry: h * 0.13, startDeg: 180, endDeg: 360 },
+      ];
+    case "server": {
+      const out: Sub[] = [{ shape: "rect", x, y, w, h }];
+      const bh = h / Math.max(1, units);
+      for (let i = 1; i < units; i++) out.push(L(x, y + bh * i, x + w, y + bh * i)); // 单元分隔
+      for (let i = 0; i < units; i++) {
+        const top = y + bh * i;
+        out.push(L(x + w * 0.32, top + bh * 0.34, x + w * 0.68, top + bh * 0.34)); // 通风线 1
+        out.push(L(x + w * 0.32, top + bh * 0.56, x + w * 0.68, top + bh * 0.56)); // 通风线 2
+        out.push({ shape: "ellipse", cx: x + w * 0.13, cy: top + bh * 0.45, rx: w * 0.022, ry: bh * 0.14 }); // led
+      }
+      return out;
+    }
+    case "cloud":
+      return [
+        // 顶部三个弧丘（spline 过点）
+        {
+          shape: "spline",
+          points: [
+            [x + w * 0.12, y + h * 0.72],
+            [x + w * 0.09, y + h * 0.5],
+            [x + w * 0.22, y + h * 0.27],
+            [x + w * 0.38, y + h * 0.4],
+            [x + w * 0.5, y + h * 0.15],
+            [x + w * 0.66, y + h * 0.34],
+            [x + w * 0.8, y + h * 0.29],
+            [x + w * 0.91, y + h * 0.5],
+            [x + w * 0.88, y + h * 0.72],
+          ],
+        },
+        L(x + w * 0.88, y + h * 0.72, x + w * 0.12, y + h * 0.72), // 平底
+      ];
+    case "actor":
+      return [
+        { shape: "ellipse", cx, cy: y + h * 0.13, rx: w * 0.18, ry: h * 0.11 }, // 头
+        L(cx, y + h * 0.24, cx, y + h * 0.58), // 躯干
+        L(x + w * 0.12, y + h * 0.36, x + w * 0.88, y + h * 0.36), // 平举双臂
+        L(cx, y + h * 0.58, x + w * 0.28, y + h * 0.95), // 左腿
+        L(cx, y + h * 0.58, x + w * 0.72, y + h * 0.95), // 右腿
+      ];
+    case "group":
+      // 虚线分组边界（4 边 dash）；标题 tab 由 agent 用 text 落在左上角
+      return [
+        { shape: "dash", from: [x, y], to: [x + w, y] },
+        { shape: "dash", from: [x + w, y], to: [x + w, y + h] },
+        { shape: "dash", from: [x + w, y + h], to: [x, y + h] },
+        { shape: "dash", from: [x, y + h], to: [x, y] },
+      ];
+  }
+}
+
+/** 单原语 shape → 笔迹点列族（arrow/dash/hatch 各产多笔） */
+function resolvePointLists(shape: ShapeSpec): SketchPoint[][] {
+  if (shape.shape === "arrow") return sampleArrow(shape);
+  if (shape.shape === "dash") return dashSegments(shape);
+  if (shape.shape === "hatch") return hatchLines(shape);
+  return [sampleShape(shape as StrokeShape)];
+}
+
+/* ===== icon：直接用 looseleaf 真实 icon 渲染成笔迹 =====
+ * 静态数据 icon-points.json（预生成自 looseleaf icons 库的纯点列，24 网格）。
+ * 之前尝试 require web 源码，但 web 用 @/ 别名、sketchpad 后端解析不了，改静态数据。 */
+import iconPoints from "./icon-points.json" with { type: "json" };
+
+/** icon 形状 → 笔迹点列族：查静态点列，平移到 (x,y)，scale 到 size（24 网格 → size） */
+export function buildIconStrokes(name: string, x: number, y: number, size = 28): SketchPoint[][] {
+  const polys = (iconPoints as unknown as Record<string, number[][][]>)[name];
+  if (!polys?.length) return [];
+  const k = size / 24;
+  return polys.map((poly) => poly.map((p) => [x + p[0] * k, y + p[1] * k] as [number, number]));
+}
+
 /* ===== 文档存储 ===== */
 
 function blankDoc(): CanvasDoc {
@@ -334,6 +452,8 @@ function blankDoc(): CanvasDoc {
     size: 1,
     strokes: [],
     texts: [],
+    icons: [],
+    groups: [],
     updatedAt: new Date().toISOString(),
   };
 }
@@ -347,13 +467,15 @@ export function canvasId(d = new Date()): string {
 /** 画布目录内画布文件的文件名（<id>.json）；sketch.json 是多画布之前的单文档旧格式 */
 const isCanvasFile = (name: string): boolean => /^\d{14}\.json$/.test(name);
 
-/** 画布内容快照：笔迹 + 文本元素一起进出撤销栈 */
+/** 画布内容快照：笔迹 + 文本 + icon + 命名分组一起进出撤销栈 */
 export interface CanvasContent {
   strokes: SketchStroke[];
   texts: SketchText[];
+  icons: SketchIcon[];
+  groups: ElementGroup[];
 }
 
-const emptyContent = (): CanvasContent => ({ strokes: [], texts: [] });
+const emptyContent = (): CanvasContent => ({ strokes: [], texts: [], icons: [], groups: [] });
 
 /** 单个画布的状态：文档 + 该画布自己的撤销/重做栈（多画布互相隔离） */
 export class CanvasState {
@@ -379,7 +501,7 @@ export class CanvasState {
   }
 
   private snapshot(): CanvasContent {
-    return { strokes: this.doc.strokes, texts: this.doc.texts };
+    return { strokes: this.doc.strokes, texts: this.doc.texts, icons: this.doc.icons, groups: this.doc.groups };
   }
 
   /** 全量替换内容（页面擦除/撤销/清空后的 PUT 全覆盖；texts 省略 = 保留现有文本） */
@@ -394,6 +516,72 @@ export class CanvasState {
 
   append(strokes: SketchStroke[], texts: SketchText[] = []): void {
     this.replaceStrokes([...this.doc.strokes, ...strokes], texts.length ? [...this.doc.texts, ...texts] : undefined);
+  }
+
+  /** 把这批笔迹/文本/icon 归到命名组（同名合并）。draw 带 group 时调用——这是语义绑定的入口 */
+  registerGroup(name: string, strokeIds: string[], textIds: string[], iconIds: string[] = []): void {
+    if (!strokeIds.length && !textIds.length && !iconIds.length) return;
+    const g = this.doc.groups.find((x) => x.name === name);
+    if (g) {
+      g.strokeIds.push(...strokeIds);
+      g.textIds.push(...textIds);
+      g.iconIds = [...(g.iconIds ?? []), ...iconIds];
+    } else {
+      this.doc.groups.push({ name, strokeIds: [...strokeIds], textIds: [...textIds], iconIds: [...iconIds] });
+    }
+    this.save();
+  }
+
+  /** 按名删除整组：擦掉该组所有笔迹/文本/icon，并从分组表移除。返回删除数 */
+  removeGroup(name: string): { strokes: number; texts: number; icons: number; found: boolean } {
+    const g = this.doc.groups.find((x) => x.name === name);
+    if (!g) return { strokes: 0, texts: 0, icons: 0, found: false };
+    const drop = new Set([...g.strokeIds, ...g.textIds, ...(g.iconIds ?? [])]);
+    const strokes = this.doc.strokes.filter((s) => !drop.has(s.id));
+    const texts = this.doc.texts.filter((t) => !drop.has(t.id));
+    const icons = this.doc.icons.filter((i) => !drop.has(i.id));
+    const removedStrokes = this.doc.strokes.length - strokes.length;
+    const removedTexts = this.doc.texts.length - texts.length;
+    const removedIcons = this.doc.icons.length - icons.length;
+    this.past.push(this.snapshot());
+    if (this.past.length > HISTORY_MAX) this.past.shift();
+    this.future = [];
+    this.doc.strokes = strokes;
+    this.doc.texts = texts;
+    this.doc.icons = icons;
+    this.doc.groups = this.doc.groups.filter((x) => x.name !== name);
+    this.touch();
+    return { strokes: removedStrokes, texts: removedTexts, icons: removedIcons, found: true };
+  }
+
+  /** 按元素 id 删除笔迹/文本/icon（局部修正的主力：undo 粒度是整次 draw 调用，删单个元素用它）。
+   *  与 replaceStrokes 同进出撤销栈；删除的 id 同时从所有分组里清理；返回各类实际删除数 */
+  remove(ids: string[]): { strokes: number; texts: number; icons: number } {
+    const drop = new Set(ids);
+    const strokes = this.doc.strokes.filter((s) => !drop.has(s.id));
+    const texts = this.doc.texts.filter((t) => !drop.has(t.id));
+    const icons = this.doc.icons.filter((i) => !drop.has(i.id));
+    const removedStrokes = this.doc.strokes.length - strokes.length;
+    const removedTexts = this.doc.texts.length - texts.length;
+    const removedIcons = this.doc.icons.length - icons.length;
+    if (!removedStrokes && !removedTexts && !removedIcons) return { strokes: 0, texts: 0, icons: 0 };
+    this.past.push(this.snapshot());
+    if (this.past.length > HISTORY_MAX) this.past.shift();
+    this.future = [];
+    this.doc.strokes = strokes;
+    this.doc.texts = texts;
+    this.doc.icons = icons;
+    // 清理分组里被删的 id；空组移除
+    this.doc.groups = this.doc.groups
+      .map((g) => ({
+        name: g.name,
+        strokeIds: g.strokeIds.filter((id) => !drop.has(id)),
+        textIds: g.textIds.filter((id) => !drop.has(id)),
+        iconIds: (g.iconIds ?? []).filter((id) => !drop.has(id)),
+      }))
+      .filter((g) => g.strokeIds.length || g.textIds.length || g.iconIds?.length);
+    this.touch();
+    return { strokes: removedStrokes, texts: removedTexts, icons: removedIcons };
   }
 
   /** 更新默认画笔/颜色/粗细（不进 undo 历史：不影响已有笔迹） */
@@ -414,6 +602,8 @@ export class CanvasState {
       const c = this.past.pop()!;
       this.doc.strokes = c.strokes;
       this.doc.texts = c.texts;
+      this.doc.icons = c.icons;
+      this.doc.groups = c.groups;
       n++;
     }
     if (n) this.touch();
@@ -428,9 +618,35 @@ export class CanvasState {
       const c = this.future.pop()!;
       this.doc.strokes = c.strokes;
       this.doc.texts = c.texts;
+      this.doc.icons = c.icons;
+      this.doc.groups = c.groups;
       n++;
     }
     if (n) this.touch();
+    return n;
+  }
+
+  /** 追加 icon 元素（draw 带 icon 形状时调用，进 undo 栈） */
+  addIcons(icons: SketchIcon[]): void {
+    if (!icons.length) return;
+    this.past.push(this.snapshot());
+    if (this.past.length > HISTORY_MAX) this.past.shift();
+    this.future = [];
+    this.doc.icons.push(...icons);
+    this.touch();
+  }
+
+  /** 清空全部内容（笔迹+文本+icon，进撤销栈可恢复） */
+  clearAll(): number {
+    const n = this.doc.strokes.length + this.doc.texts.length + this.doc.icons.length;
+    if (!n) return 0;
+    this.past.push(this.snapshot());
+    if (this.past.length > HISTORY_MAX) this.past.shift();
+    this.future = [];
+    this.doc.strokes = [];
+    this.doc.texts = [];
+    this.doc.icons = [];
+    this.touch();
     return n;
   }
 }
@@ -472,6 +688,8 @@ export class CanvasStore {
       const j = JSON.parse(readFileSync(legacy, "utf8")) as CanvasDoc;
       if (j.version !== 1 || !Array.isArray(j.strokes)) return;
       if (!Array.isArray(j.texts)) j.texts = [];
+      if (!Array.isArray(j.groups)) j.groups = [];
+      if (!Array.isArray(j.icons)) j.icons = [];
       const parsed = j.updatedAt ? new Date(j.updatedAt) : fs.statSync(legacy).mtime;
       const id = canvasId(Number.isNaN(parsed.getTime()) ? new Date() : parsed);
       writeFileSync(join(this.dir, `${id}.json`), JSON.stringify(j));
@@ -505,6 +723,8 @@ export class CanvasStore {
       const j = JSON.parse(readFileSync(file, "utf8")) as CanvasDoc;
       if (j.version !== 1 || !Array.isArray(j.strokes)) return undefined;
       if (!Array.isArray(j.texts)) j.texts = [];
+      if (!Array.isArray(j.groups)) j.groups = [];
+      if (!Array.isArray(j.icons)) j.icons = [];
       st = new CanvasState(file, j);
     } catch {
       return undefined;
@@ -545,7 +765,7 @@ export function buildStrokes(
   defaults: { tool: DrawTool; color: SketchColor; size: number },
   width: number,
   height: number,
-): { strokes: SketchStroke[]; texts: SketchText[]; clamped: number } {
+): { strokes: SketchStroke[]; texts: SketchText[]; icons: SketchIcon[]; clamped: number } {
   const tool = shape.tool ?? defaults.tool;
   const color = autoColor(tool, shape.color ?? defaults.color);
   const size = shape.size ?? defaults.size;
@@ -558,19 +778,36 @@ export function buildStrokes(
       color: shape.color ?? defaults.color,
       text: shape.text,
     };
-    return { strokes: [], texts: [t], clamped: 0 };
+    return { strokes: [], texts: [t], icons: [], clamped: 0 };
   }
-  const pointLists =
-    shape.shape === "arrow" ? sampleArrow(shape)
-    : shape.shape === "dash" ? dashSegments(shape)
-    : shape.shape === "hatch" ? hatchLines(shape)
-    : [sampleShape(shape)];
+  // icon 形状 → 注册为 1:1 looseleaf icon 元素（不转笔迹）
+  if (shape.shape === "icon") {
+    const ic: SketchIcon = {
+      id: `m${rev + 1}x${index}`,
+      name: shape.name,
+      x: clampCoord(shape.x),
+      y: clampCoord(shape.y),
+      size: shape.size ?? 28,
+      color: shape.color ?? defaults.color,
+    };
+    return { strokes: [], texts: [], icons: [ic], clamped: 0 };
+  }
+  // stencil 先展开成原语子 shape；其他形状本身就是单子 shape
+  let pointLists: SketchPoint[][];
+  {
+    const subs: ShapeSpec[] =
+      shape.shape === "stencil"
+        ? stencilBuild(shape.kind, shape.x, shape.y, shape.w, shape.h ?? shape.w * STENCIL_ASPECT[shape.kind], shape.units ?? 3)
+        : [shape];
+    pointLists = [];
+    for (const sub of subs) pointLists.push(...resolvePointLists(sub));
+  }
   let clamped = 0;
   const strokes: SketchStroke[] = pointLists.map((pts, k) => {
     clamped += clampPts(pts, width, height);
     return { id: `m${rev + 1}x${index}${k ? `k${k}` : ""}`, tool: drawToolOf(tool), color, size, pts };
   });
-  return { strokes, texts: [], clamped };
+  return { strokes, texts: [], icons: [], clamped };
 }
 
 /** 落笔画笔不能是橡皮（橡皮只擦不画）——与 backend 的 drawTool 同规则 */

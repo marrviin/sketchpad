@@ -9,7 +9,10 @@ import { RadioGroup as RadioGroupPrimitive } from "radix-ui"
 
 import { Button } from "@/components/ui/button"
 import { Paper, type PaperProps } from "@/components/ui/paper"
-import { useInk, useInkTier, useMergedRef } from "@content-forge/ink/react"
+import { useInk, useInkTier, useMergedRef, useEnsureInkDefs } from "@content-forge/ink/react"
+import { icons as inkIcons } from "@content-forge/ink/art/icons"
+import type { ArtDef } from "@content-forge/ink/art/types"
+import { drawSkeleton } from "@content-forge/ink/art-draw"
 import {
   DARK_INKS,
   DRAW_TOOLS,
@@ -46,6 +49,16 @@ interface SketchText {
   text: string
 }
 
+/** 1:1 looseleaf icon 元素（agent-only；镜像 contract.ts 的 SketchIcon） */
+interface SketchDocIcon {
+  id: string
+  name: string
+  x: number
+  y: number
+  size: number
+  color: SketchColor
+}
+
 const TEXT_FONT = '"LXGW WenKai Lite", "Kaiti SC", "STKaiti", serif'
 /** 与 sketchpad snapshot 渲染器同一近似基线（左上角定位 → y + size*0.78） */
 const TEXT_BASELINE_K = 0.78
@@ -57,8 +70,11 @@ export interface SketchpadView {
   zoom: number
 }
 
-export const ZOOM_MIN = 0.1
+export const ZOOM_MIN = 0.05
 export const ZOOM_MAX = 4
+/** 缩放落点吸附的 ln 网格步长（ln 0.02 ≈ 2% 步），与 workflow 图页同款——
+ *  静止缩放稳定在网格上，同样的缩放比重复出现时渲染可复用；限制的是分辨率不是速度 */
+export const ZOOM_STEP_LN = 0.02
 export const clampZoom = (z: number): number => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))
 
 /** 光标锚定缩放：让 (px,py) 下的世界点在缩放后保持在原屏幕位置（workflow 同款公式） */
@@ -122,6 +138,7 @@ function withIds(strokes: readonly StrokeInput[]): SketchStroke[] {
 interface SketchpadContextValue {
   strokes: SketchStroke[]
   texts: readonly SketchText[]
+  icons: readonly SketchDocIcon[]
   width: number
   height: number
   view: SketchpadView
@@ -170,6 +187,8 @@ type SketchpadProps = Omit<React.ComponentProps<"div">, "onChange" | "defaultVal
   onValueChange?: (strokes: SketchStroke[]) => void
   /** 手写风文本标注（agent-only 受控值；页面不提供编辑入口，随文档渲染） */
   texts?: readonly SketchText[]
+  /** 1:1 looseleaf icon 元素（agent-only；页面随文档渲染） */
+  icons?: readonly SketchDocIcon[]
   tool?: SketchTool
   defaultTool?: SketchTool
   onToolChange?: (tool: SketchTool) => void
@@ -201,6 +220,7 @@ function Sketchpad({
   defaultValue,
   onValueChange,
   texts = [],
+  icons = [],
   tool: toolProp,
   defaultTool = "felt",
   onToolChange,
@@ -386,6 +406,7 @@ function Sketchpad({
   const ctx: SketchpadContextValue = {
     strokes,
     texts,
+    icons,
     width,
     height,
     view,
@@ -441,6 +462,53 @@ function Sketchpad({
         )}
       </div>
     </SketchpadContext.Provider>
+  )
+}
+
+/** 1:1 looseleaf icon 层:drawSkeleton 渲染(与 Icon 组件同一管线,颗粒 mask 由全局 defs 提供),
+ *  按 glyph pts bbox 中心定位——glyph 不满铺,按盒中心放会歪;对齐目标盒中心才是真居中。
+ *  与 sketchpad snapshot 渲染器(render.ts iconEls)同一变换,两端一致。 */
+const docIconMemo = new Map<string, { svg: string; bbox: [number, number, number, number] } | null>()
+function docIconRender(name: string) {
+  const hit = docIconMemo.get(name)
+  if (hit !== undefined) return hit
+  let out: { svg: string; bbox: [number, number, number, number] } | null = null
+  try {
+    const def = (inkIcons as Record<string, ArtDef>)[name]
+    if (def) {
+      const res = drawSkeleton(def, 64, name, { kind: "icon" })
+      // res.bbox = [x0, y0, x1, y1](64 盒坐标),归一化
+      const [bx0, by0, bx1, by1] = res.bbox
+      out = { svg: res.svg, bbox: [bx0 / 64, by0 / 64, bx1 / 64, by1 / 64] }
+    }
+  } catch { /* 未知 icon 名留空 */ }
+  docIconMemo.set(name, out)
+  return out
+}
+
+function DocIconsLayer({ icons }: { icons: readonly SketchDocIcon[] }) {
+  useEnsureInkDefs()
+  return (
+    <g data-slot="sketchpad-icons">
+      {icons.map((ic) => {
+        const m = docIconRender(ic.name)
+        if (!m) return null
+        const [b0, b1, b2, b3] = m.bbox
+        const cx = (b0 + b2) / 2
+        const cy = (b1 + b3) / 2
+        const tx = ic.x + ic.size / 2 - cx * ic.size
+        const ty = ic.y + ic.size / 2 - cy * ic.size
+        return (
+          <g
+            key={ic.id}
+            data-icon={ic.name}
+            transform={`translate(${tx.toFixed(1)} ${ty.toFixed(1)}) scale(${(ic.size / 64).toFixed(4)})`}
+            style={{ color: `var(--ll-${ic.color})` }}
+            dangerouslySetInnerHTML={{ __html: m.svg }}
+          />
+        )
+      })}
+    </g>
   )
 }
 
@@ -716,17 +784,7 @@ function thin(pts: SketchPoint[]): SketchPoint[] {
   return out
 }
 
-const PAPERS: Record<NonNullable<SketchpadCanvasProps["paper"]>, Pick<PaperProps, "stock" | "rules">> = {
-  plain: { stock: "paper", rules: "none" },
-  ruled: { stock: "paper", rules: "ruled" },
-  graph: { stock: "graph" },
-  dots: { stock: "dot-grid" },
-  kraft: { stock: "kraft", rules: "none" },
-}
-
 type SketchpadCanvasProps = Omit<React.ComponentProps<"div">, "children"> & {
-  paper?: "plain" | "ruled" | "graph" | "dots" | "kraft"
-  paperProps?: Omit<PaperProps, "children" | "ref">
   label?: string
   children?: React.ReactNode
   seed?: string | number
@@ -734,7 +792,7 @@ type SketchpadCanvasProps = Omit<React.ComponentProps<"div">, "children"> & {
   autoFit?: boolean
 }
 
-function SketchpadCanvas({ className, style: styleProp, children, paper = "plain", paperProps, label = "Drawing", seed, autoFit = false, ref, onKeyDown, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onLostPointerCapture, onBlur, ...props }: SketchpadCanvasProps) {
+function SketchpadCanvas({ className, style: styleProp, children, label = "Drawing", seed, autoFit = false, ref, onKeyDown, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onLostPointerCapture, onBlur, ...props }: SketchpadCanvasProps) {
   const ctx = useSketchpad()
   const tier = useInkTier()
   const { hostRef, hostProps, node } = useInk({ recipe: canvasFrameRecipe, params: {}, kind: "sketchpad-canvas", size: [ctx.width, ctx.height], seed })
@@ -749,6 +807,8 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
   const [cursor, setCursor] = React.useState<[number, number] | null>(null)
   const pan = React.useRef<{ pointerId: number; sx: number; sy: number; vx: number; vy: number } | null>(null)
   const spaceRef = React.useRef(false)
+  /** 世界锚定层 ref（与 surface svg 成对）：手势期 transform 直写 DOM，见 applyViewDom */
+  const worldRef = React.useRef<HTMLDivElement | null>(null)
   const interactive = !ctx.readOnly && !ctx.disabled
 
   // Space 按住 = 平移（Figma 惯例）；画布聚焦时键盘落笔改由 Enter 承担（onKey 里的 Space 分支已移除）。
@@ -780,6 +840,17 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
   // wheel/pan 处理器里同步读视口，绕开 effect 闭包
   const viewRef = React.useRef(view)
   viewRef.current = view
+
+  /** 手势期直写 DOM transform（与 workflow 的 d3 同款）：wheel 平移/缩放与拖拽 pan 的
+   *  每帧更新不再走 React setState——否则每帧触发整树 reconciliation + localStorage，
+   *  就是"缩放流畅、移动还卡"的根源。同步更新 viewRef 保证 project() 画线坐标准确；
+   *  手势结束时由调用方 setView(一次) 同步 React state 与持久化 */
+  const applyViewDom = React.useCallback((v: SketchpadView) => {
+    viewRef.current = v
+    const t = `translate(${v.x}px, ${v.y}px) scale(${v.zoom})`
+    if (surface.current) surface.current.style.transform = t
+    if (worldRef.current) worldRef.current.style.transform = t
+  }, [])
   const [pane, setPane] = React.useState<[number, number]>([W, H])
   const paneRef = React.useRef<[number, number]>(pane)
   paneRef.current = pane
@@ -833,11 +904,22 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
 
   // 滚轮：普通滚轮平移 / shift+滚轮横向 / ctrl或⌘+滚轮以光标为锚缩放。
   // 必须原生监听（React 合成 wheel 是 passive 的，preventDefault 无效），rAF 合帧。
+  // 缩放参数与 workflow 图页完全对齐（pipeline-graph-page attachWheel 同款）：
+  // 敏感度 exp(-deltaY*0.01) + 连续手势水位（亚步进残差跨帧保留，慢捏合首帧即跟手）+
+  // 目标吸附 2% ln 对数网格（静止缩放稳定在网格上，tiles 跨手势可复用）。
   React.useEffect(() => {
     const el = ctx.canvasRef.current
     if (!el) return
     let pending: { clientX: number; clientY: number; dx: number; dy: number; zoom: boolean } | null = null
     let raf = 0
+    /** 本次缩放手势的连续水位（不吸附）；空闲 300ms 后清零，下次手势重新锚定当前缩放 */
+    let gestureZoom: number | null = null
+    let idleTimer = 0
+    const settle = () => {
+      // 手势结束：把 DOM 直写的最终视口同步回 React state（触发一次渲染）+ 持久化
+      const v = viewRef.current
+      if (v.x !== view.x || v.y !== view.y || v.zoom !== view.zoom) setView(v)
+    }
     const apply = () => {
       raf = 0
       if (!pending) return
@@ -846,15 +928,28 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
       const py = pending.clientY - r.top
       const v = viewRef.current
       if (pending.zoom) {
-        const z = clampZoom(v.zoom * Math.exp(-pending.dy * 0.01))
-        if (z !== v.zoom) setView(anchoredZoom(v, px, py, z))
+        // 图层提升（workflow 的 flow-gesturing 同款）：手势中整层 GPU 纹理缩放/平移，
+        // 空闲 300ms 后复位，触发一次最终尺度的重栅格化（变清晰）
+        el.setAttribute("data-gesturing", "")
+        if (gestureZoom === null) gestureZoom = v.zoom
+        const raw = clampZoom(gestureZoom * Math.exp(-pending.dy * 0.01))
+        gestureZoom = raw
+        const target = clampZoom(Math.exp(Math.round(Math.log(raw) / ZOOM_STEP_LN) * ZOOM_STEP_LN))
+        if (target !== v.zoom) applyViewDom(anchoredZoom(v, px, py, target))
       } else {
-        setView({ x: v.x - pending.dx, y: v.y - pending.dy, zoom: v.zoom })
+        applyViewDom({ x: v.x - pending.dx, y: v.y - pending.dy, zoom: v.zoom })
       }
+      window.clearTimeout(idleTimer)
+      idleTimer = window.setTimeout(() => {
+        gestureZoom = null
+        el.removeAttribute("data-gesturing")
+        settle()
+      }, 300)
       pending = null
     }
     const onWheel = (e: WheelEvent) => {
-      const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1
+      // 平移像素 1:1（d3 translateBy 世界位移 ÷ zoom 的净效果）；deltaMode 与 React Flow 同款
+      const k = e.deltaMode === 1 ? 20 : 1
       let dx = e.deltaX * k
       let dy = e.deltaY * k
       if (e.shiftKey && !dx) {
@@ -872,6 +967,8 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
     return () => {
       el.removeEventListener("wheel", onWheel, { capture: true })
       if (raf) cancelAnimationFrame(raf)
+      window.clearTimeout(idleTimer)
+      el.removeAttribute("data-gesturing")
     }
   }, [])
 
@@ -973,6 +1070,8 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
     }
     if (wantPan) {
       pan.current = { pointerId: e.pointerId, sx: e.clientX, sy: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y }
+      // 拖拽平移也是手势期直写 DOM（与 wheel 平移同法）：pointermove 每帧 setState = 卡
+      e.currentTarget.closest("[data-slot='sketchpad-canvas']")?.setAttribute("data-gesturing", "")
       e.preventDefault()
       return
     }
@@ -986,7 +1085,7 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
     onPointerMove?.(e)
     if (e.pointerType === "pen") penSeen.current = e.timeStamp
     if (pan.current && pan.current.pointerId === e.pointerId) {
-      setView({ x: pan.current.vx + (e.clientX - pan.current.sx), y: pan.current.vy + (e.clientY - pan.current.sy), zoom: viewRef.current.zoom })
+      applyViewDom({ x: pan.current.vx + (e.clientX - pan.current.sx), y: pan.current.vy + (e.clientY - pan.current.sy), zoom: viewRef.current.zoom })
       return
     }
     const g = gesture.current
@@ -1004,6 +1103,11 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
     if (e.pointerType === "pen") penSeen.current = e.timeStamp
     if (pan.current && pan.current.pointerId === e.pointerId) {
       pan.current = null
+      // pan 手势结束：DOM 直写的最终视口同步回 React state（一次渲染）+ 持久化
+      const v = viewRef.current
+      setView(v)
+      const host = e.currentTarget.closest("[data-slot='sketchpad-canvas']")
+      if (host) host.removeAttribute("data-gesturing")
       return
     }
     const g = gesture.current
@@ -1018,7 +1122,12 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
   }
   const onLost = (e: React.PointerEvent<HTMLDivElement>) => {
     onLostPointerCapture?.(e)
-    if (pan.current && pan.current.pointerId === e.pointerId) pan.current = null
+    if (pan.current && pan.current.pointerId === e.pointerId) {
+      pan.current = null
+      // pan 被中断（指针捕获丢失）：同步最终视口 + 撤掉图层提升
+      setView(viewRef.current)
+      e.currentTarget.closest("[data-slot='sketchpad-canvas']")?.removeAttribute("data-gesturing")
+    }
     if (gesture.current && gesture.current.pointer === e.pointerId) end(false)
   }
 
@@ -1098,7 +1207,6 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
     if (!e.currentTarget.contains(e.relatedTarget)) setCursor(null)
   }
 
-  const p = PAPERS[paper]
   const timing = React.useMemo<ReplayTiming[] | null>(() => {
     if (!ctx.replaying) return null
     let t = 0.2
@@ -1117,16 +1225,6 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
     : ({ role: "img", "aria-label": `${label}, ${count(ctx.strokes.length)}`, "aria-disabled": ctx.disabled || undefined } as const)
 
   const z = view.zoom
-  // 无限画布底面：纸色平面 + 双层点阵（20px 小点 + 100px 大点），随视口平移缩放；
-  // 与 workflow 图页的 dot-grid Paper 桌面同款观感
-  const dotGridStyle = {
-    backgroundColor: "var(--color-paper, var(--ll-paper, #f8f5ee))",
-    backgroundImage:
-      "radial-gradient(circle at center, color-mix(in srgb, var(--ll-pencil, #a89f8d) 70%, transparent) 0 1.05px, transparent 1.5px)," +
-      "radial-gradient(circle at center, color-mix(in srgb, var(--ll-pencil-mark, #c2b9a6) 90%, transparent) 0 .8px, transparent 1.15px)",
-    backgroundSize: `${100 * z}px ${100 * z}px, ${20 * z}px ${20 * z}px`,
-    backgroundPosition: `${view.x + 10 * z}px ${view.y + 10 * z}px, ${view.x + 10 * z}px ${view.y + 10 * z}px`,
-  } as React.CSSProperties
 
   return (
     <div
@@ -1144,54 +1242,58 @@ function SketchpadCanvas({ className, style: styleProp, children, paper = "plain
       onKeyDown={onKey}
       onBlur={dropKeyboard}
       className={cn("relative isolate touch-none select-none overflow-hidden", interactive ? (ctx.tool === "eraser" ? "cursor-cell" : "cursor-crosshair") : "cursor-default", className)}
-      style={{ ...dotGridStyle, ...styleProp }}
+      style={styleProp}
       {...props}
     >
       {node}
-      {/* 首页画纸（W×H，世界原点）：随视口平移缩放，框外是无限点阵平面 */}
-      <Paper
-        data-slot="sketchpad-paper"
-        edge="cut"
-        tilt={false}
-        {...p}
-        {...paperProps}
-        className={cn("absolute left-0 top-0 origin-top-left", paperProps?.className)}
-        style={{ width: W, height: H, transform: `translate(${view.x}px, ${view.y}px) scale(${z})`, ...paperProps?.style }}
+      {/* dot-grid 纸面桌：与 workflow 图页完全同款——固定满铺 looseleaf Paper（真纸面：
+          底色 + 纤维纹理 + 手绘感点阵），不随视口平移缩放，笔迹/节点像纸片一样在桌面上移动 */}
+      <Paper stock="dot-grid" tilt={false} shadow="none" className="absolute inset-0" aria-hidden />
+      {/* 世界锚定层：children 随视口平移缩放（世界原点 = 首页画框 W×H 左上角，
+          只剩坐标意义——norm 0~1 与 fitHome/快捷键 0 的回位目标） */}
+      <div
+        ref={worldRef}
+        data-slot="sketchpad-world"
+        className="absolute left-0 top-0 origin-top-left"
+        style={{ width: W, height: H, transform: `translate(${view.x}px, ${view.y}px) scale(${z})` }}
       >
         {children}
-      </Paper>
+      </div>
+      {/* 视口变换画在 svg 元素自身的 CSS transform 上（不是内部 <g> 属性）：SVG 内部变换每帧
+          重栅格化全部矢量笔迹，元素级 CSS transform 才能被 GPU 合成——配合手势期的
+          data-gesturing 图层提升（见 styles.css），缩放/平移手势中零主线程重绘，与 workflow 同法 */}
       <svg
         ref={surface}
         data-slot="sketchpad-surface"
         aria-hidden="true"
         focusable="false"
         className="pointer-events-none absolute inset-0 size-full forced-color-adjust-none"
+        style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${z})`, transformOrigin: "0 0" }}
       >
-        <g transform={`translate(${view.x} ${view.y}) scale(${z})`}>
-          {ctx.texts.length > 0 && (
-            <g data-slot="sketchpad-texts">
-              {ctx.texts.map((t) => (
-                <text
-                  key={t.id}
-                  data-text={t.id}
-                  x={t.x}
-                  y={t.y + t.size * TEXT_BASELINE_K}
-                  fill={`var(--ll-${t.color})`}
-                  style={{ fontFamily: TEXT_FONT, fontSize: t.size }}
-                >
-                  {t.text}
-                </text>
-              ))}
-            </g>
-          )}
-          <g data-slot="sketchpad-strokes" key={ctx.replayKey}>
-            {ctx.strokes.map((s, i) => (
-              <StrokeShape key={s.id} stroke={s} dim={erasing.has(s.id)} replay={timing?.[i] ?? null} maskId={`ll-replay-${uid}-${i}`} />
+        {ctx.texts.length > 0 && (
+          <g data-slot="sketchpad-texts">
+            {ctx.texts.map((t) => (
+              <text
+                key={t.id}
+                data-text={t.id}
+                x={t.x}
+                y={t.y + t.size * TEXT_BASELINE_K}
+                fill={`var(--ll-${t.color})`}
+                style={{ fontFamily: TEXT_FONT, fontSize: t.size }}
+              >
+                {t.text}
+              </text>
             ))}
           </g>
-          {live ? <g data-slot="sketchpad-live" dangerouslySetInnerHTML={{ __html: liveMarkup }} /> : null}
-          {cursor ? <g data-slot="sketchpad-cursor" transform={`translate(${cursor[0]} ${cursor[1]})`} dangerouslySetInnerHTML={{ __html: cursorSvg }} /> : null}
+        )}
+        {ctx.icons.length > 0 && <DocIconsLayer icons={ctx.icons} />}
+        <g data-slot="sketchpad-strokes" key={ctx.replayKey}>
+          {ctx.strokes.map((s, i) => (
+            <StrokeShape key={s.id} stroke={s} dim={erasing.has(s.id)} replay={timing?.[i] ?? null} maskId={`ll-replay-${uid}-${i}`} />
+          ))}
         </g>
+        {live ? <g data-slot="sketchpad-live" dangerouslySetInnerHTML={{ __html: liveMarkup }} /> : null}
+        {cursor ? <g data-slot="sketchpad-cursor" transform={`translate(${cursor[0]} ${cursor[1]})`} dangerouslySetInnerHTML={{ __html: cursorSvg }} /> : null}
       </svg>
       <span id={help} className="sr-only">
         Draw with a pointer, or use the arrow keys to move a cursor and Enter to put the pen down and lift it. F, B, P, M, H and E pick a tool, the bracket keys change the width, Control Z undoes. Wheel pans, Control wheel zooms, Space drag or middle drag pans, 0 resets the view.

@@ -7,6 +7,40 @@
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import type { SketchColor, SketchPoint, SketchStroke, SketchText } from "./contract.js";
+import iconBundle from "./icon-bundle.json" with { type: "json" };
+
+/** 1:1 looseleaf icon 渲染：defs 一次注入 + 每个 icon 按 glyph bbox 中心定位。
+ *  icon SVG 内 fill="currentColor"，用 style.color 套到 PALETTE 色值。
+ *  bundle svg 坐标系 = drawSkeleton(def, 64) 的 64 盒；bbox 归一化 0..1。
+ *  glyph 不满铺（各 icon bbox 不同），按 bbox 中心对齐目标盒中心才真居中。
+ *  defs 来自 inkDefsSvg 的 <svg width=0><defs>…</defs></svg> 壳——resvg 不读嵌套
+ *  svg 里的 defs，必须剥壳只留 <defs> 内层（页面 DOM 无此问题）。 */
+const _bundle = iconBundle as unknown as IconBundle;
+const ICON_DEFS = (_bundle.defs.match(/<defs>[\s\S]*<\/defs>/)?.[0] ?? _bundle.defs);
+const ICON_SVGS = _bundle.icons;
+
+interface IconBundle {
+  defs: string;
+  icons: Record<string, { svg: string; bbox: [number, number, number, number] }>;
+}
+
+type IconShape = { id: string; name: string; x: number; y: number; size: number; color: SketchColor };
+
+function iconEls(icons: readonly IconShape[]): string[] {
+  return icons.map((ic) => {
+    const entry = ICON_SVGS[ic.name];
+    if (!entry) return "";
+    const color = PALETTE[ic.color] ?? PALETTE.ink;
+    const k = ic.size / 64;
+    // bbox 为 64 盒绝对坐标(res.bbox 原样)→ glyph 中心 = tx + cx·k 对齐目标盒中心
+    const [b0, b1, b2, b3] = entry.bbox;
+    const cx = (b0 + b2) / 2;
+    const cy = (b1 + b3) / 2;
+    const tx = ic.x + ic.size / 2 - cx * k;
+    const ty = ic.y + ic.size / 2 - cy * k;
+    return `<g transform="translate(${tx.toFixed(1)} ${ty.toFixed(1)}) scale(${k.toFixed(3)})" style="color:${color}">${entry.svg}</g>`;
+  });
+}
 
 /** 手写风字体（页面 @font-face 与 snapshot resvg 用同一 TTF，两端渲染一致） */
 export const FONT_FAMILY = "LXGW WenKai Lite";
@@ -90,7 +124,7 @@ function intersectsRegion(
  *  region 给定时按该世界坐标区域取景（viewBox/底色矩形/尺寸都用它），否则按首页画框。
  *  参数取结构子集（width/height/strokes/texts），调用方可以直接传后端返回的 doc JSON。 */
 export function renderDocSvg(
-  doc: { width: number; height: number; strokes: readonly SketchStroke[]; texts?: readonly SketchText[] },
+  doc: { width: number; height: number; strokes: readonly SketchStroke[]; texts?: readonly SketchText[]; icons?: readonly { id: string; name: string; x: number; y: number; size: number; color: SketchColor }[] },
   o: { transparent?: boolean; region?: { x0: number; y0: number; w: number; h: number } } = {},
 ): string {
   const reg = o.region ?? { x0: 0, y0: 0, w: doc.width, h: doc.height };
@@ -98,6 +132,11 @@ export function renderDocSvg(
   const parts: string[] = [];
   if (!o.transparent) {
     parts.push(`<rect x="${f(reg.x0)}" y="${f(reg.y0)}" width="${f(reg.w)}" height="${f(reg.h)}" fill="${PAPER}"/>`);
+  }
+  // icon 真实 SVG（defs 一次注入）
+  if (doc.icons?.length) {
+    parts.push(ICON_DEFS);
+    parts.push(...iconEls(doc.icons));
   }
   for (const t of doc.texts ?? []) {
     // CJK ≈ 1em/字估宽；与快照取景同一近似

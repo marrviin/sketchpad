@@ -16,3 +16,17 @@
 body {
   background: #f6f8fa;
 }
+
+/* workflow styles.css 同款 GH 线色：border-line 等 utility 依赖这个 token，
+   sketchpad 这边若不声明，border-line 不生成（回落 currentColor），顶栏边框就偏深 */
+@theme {
+  --color-line: #d0d7de;
+}
+
+/* 缩放手势期的图层提升（workflow .flow-gesturing 同款）：滚轮/捏合缩放中把视口层
+   提升为合成器纹理，每帧只做 GPU scale+translate（零主线程重绘）；手势结束 300ms 后
+   移除 will-change，触发一次最终尺度的重栅格化变清晰。属性由 SketchpadCanvas 增删 */
+[data-slot="sketchpad-canvas"][data-gesturing] [data-slot="sketchpad-surface"],
+[data-slot="sketchpad-canvas"][data-gesturing] [data-slot="sketchpad-world"] {
+  will-change: transform;
+}

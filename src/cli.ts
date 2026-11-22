@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,8 +10,9 @@ import { projectRoot } from "./paths.js";
  * sketchpad CLI：
  *   sketchpad tool <名称> [json]
  *                            调用画板工具（工具名可省略 sketchpad_ 前缀，如 state / draw / undo）
- *   sketchpad state|new|brush|draw|grid|snapshot|undo|redo|clear|preview [json]
- *                            高频工具的具名入口（等价 tool <名称> [json]）
+ *   sketchpad state|new|brush|draw|grid|snapshot|undo|redo|erase|use|clear|preview [json]
+ *                            高频工具的具名入口（等价 tool <名称> [json]）。
+ *                            参数 JSON 支持内联 / @文件路径（如 sketchpad draw @shapes.json）/ "-" 或管道 stdin
  *   sketchpad ui             确保画板服务在线并打印页面地址（daemon 或本地常驻，自动选择）
  *   sketchpad serve          内部命令：全功能服务（静态页面 + 画板 API，公告 BACKEND_PORT）
  *   sketchpad canvas-backend 内部命令：纯 API 后端（兼容旧统一网关 spawn）
@@ -31,9 +33,42 @@ const NAMED_TOOLS = [
   ["snapshot", "snapshot"],
   ["undo", "undo"],
   ["redo", "redo"],
+  ["erase", "erase"],
+  ["use", "use"],
   ["clear", "clear"],
   ["preview", "preview"],
 ] as const;
+
+/** 读 stdin 全文（参数走管道时用） */
+function readStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (c) => (data += c));
+    process.stdin.on("end", () => resolve(data));
+  });
+}
+
+/** 参数 JSON 三种来源：内联字符串 / @文件路径（draw 一批形状时免 shell 引号地狱）/
+ *  "-"（显式 stdin）或省略参数且 stdin 非终端（管道） */
+async function loadArgs(jsonArg?: string): Promise<unknown> {
+  if (jsonArg === "-") return JSON.parse(await readStdin());
+  if (jsonArg?.startsWith("@")) {
+    try {
+      return JSON.parse(readFileSync(jsonArg.slice(1), "utf8"));
+    } catch (e) {
+      console.error(`✗ 读参数文件失败：${e instanceof Error ? e.message : e}`);
+      process.exitCode = 1;
+      return undefined;
+    }
+  }
+  if (!jsonArg && !process.stdin.isTTY) {
+    const text = await readStdin();
+    if (!text.trim()) return {};
+    return JSON.parse(text);
+  }
+  return jsonArg ? JSON.parse(jsonArg) : {};
+}
 
 /** 调一个画板工具：zod 解析参数（补默认值）→ handler → 打印 text */
 async function runSketchpadTool(nameArg: string, jsonArg?: string): Promise<void> {
@@ -46,16 +81,16 @@ async function runSketchpadTool(nameArg: string, jsonArg?: string): Promise<void
     process.exitCode = 1;
     return;
   }
-  let args: unknown = {};
-  if (jsonArg) {
-    try {
-      args = JSON.parse(jsonArg);
-    } catch (e) {
-      console.error(`✗ 参数 JSON 解析失败：${e instanceof Error ? e.message : e}`);
-      process.exitCode = 1;
-      return;
-    }
+  let args: unknown;
+  try {
+    args = await loadArgs(jsonArg);
+    if (args === undefined) return; // @文件读取失败已报错
+  } catch (e) {
+    console.error(`✗ 参数 JSON 解析失败：${e instanceof Error ? e.message : e}`);
+    process.exitCode = 1;
+    return;
   }
+  if (args == null || typeof args !== "object") args = {};
   let parsed: unknown;
   try {
     parsed = z.object(def.inputSchema).parse(args);

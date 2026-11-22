@@ -105,6 +105,19 @@ export interface SketchText {
   text: string;
 }
 
+/* ===== icon 元素（1:1 looseleaf icon，直接渲染预导出 SVG，非笔迹） ===== */
+export interface SketchIcon {
+  id: string;
+  /** looseleaf icon 库名（chevron-left / search / lock …） */
+  name: string;
+  /** 左上角定位 */
+  x: number;
+  y: number;
+  /** 边长 px（24 网格缩放） */
+  size: number;
+  color: SketchColor;
+}
+
 export const textSchema = z.object({
   id: z.string().min(1),
   x: z.number(),
@@ -113,6 +126,18 @@ export const textSchema = z.object({
   color: z.enum(SKETCH_COLORS),
   text: z.string().min(1).max(200),
 });
+
+/* ===== 命名分组（语义绑定：给一批形状起名，按名擦/按名改） =====
+ * 前端不感知——只渲染 strokes/texts；groups 是后端的修改索引。 */
+
+export interface ElementGroup {
+  /** 语义名，如 "数据库" / "登录按钮" / "主标题" */
+  name: string;
+  strokeIds: string[];
+  textIds: string[];
+  /** icon 元素 id（1:1 looseleaf icon 也是可擦成员） */
+  iconIds?: string[];
+}
 
 /* ===== 画板文档（落盘格式 sketch.json） ===== */
 
@@ -129,12 +154,33 @@ export interface CanvasDoc {
   strokes: SketchStroke[];
   /** 手写风文本元素（agent-only，页面暂不提供编辑入口） */
   texts: SketchText[];
+  /** 1:1 looseleaf icon 元素（预导出 SVG，非笔迹） */
+  icons: SketchIcon[];
+  /** 命名分组（语义绑定：按名擦/按名改）；前端不感知 */
+  groups: ElementGroup[];
   updatedAt: string;
 }
 
 /* ===== 形状输入（sketchpad_draw 的 shapes 数组元素） =====
  * 高层原语（arrow/arc/star/polygon/rrect）由 document.ts 的 sampleShape 编译为普通笔迹，
  * 页面只看到 strokes——契约两侧仍只镜像数据形状，页面无需感知新形状。 */
+
+/* ===== stencil 复合符号（服务端展开成原语笔迹，前端无感） =====
+ * 只收"自由手画几乎必错"的抽象符号：设备框/数据库/服务器/云/小人/分组边界。
+ * stencil 只产笔迹，不产 label——文字标注由 agent 随后单独发 text。 */
+export const STENCIL_KINDS = ["phone", "browser", "db", "server", "cloud", "actor", "group"] as const;
+export type StencilKind = (typeof STENCIL_KINDS)[number];
+
+/** 各 stencil 的标准高宽比（h = w × aspect；h 显式传则覆盖） */
+export const STENCIL_ASPECT: Record<StencilKind, number> = {
+  phone: 2.05, // 9:19 机身
+  browser: 0.62,
+  db: 0.72,
+  server: 1.5,
+  cloud: 0.55,
+  actor: 1.7,
+  group: 0.8,
+};
 
 const Pt = z.tuple([z.number(), z.number()]);
 
@@ -144,6 +190,20 @@ const shapeOverrides = {
   color: z.enum(SKETCH_COLORS).optional(),
   size: sizeSchema.optional(),
 };
+
+/* ===== icon 形状（直接用 looseleaf 真实 icon，不是手画） =====
+ * name 是 looseleaf icon 库的名字（chevron-left / rotate-cw / lock / search …），
+ * 后端调 drawSkeleton 渲染出真实手绘 SVG，再把路径解析成笔迹点列画进画板。 */
+export const iconShapeSchema = z.object({
+  shape: z.literal("icon"),
+  name: z.string().min(1).max(40),
+  x: z.number(),
+  y: z.number(),
+  /** 边长 px（icon 是正方形）；缺省 28 */
+  size: z.number().min(8).max(120).optional(),
+  tool: z.enum(DRAW_TOOLS).optional(),
+  color: z.enum(SKETCH_COLORS).optional(),
+});
 
 export const shapeSchema = z.discriminatedUnion("shape", [
   z.object({ shape: z.literal("point"), x: z.number(), y: z.number(), ...shapeOverrides }),
@@ -165,6 +225,18 @@ export const shapeSchema = z.discriminatedUnion("shape", [
   z.object({ shape: z.literal("hatch"), x: z.number(), y: z.number(), w: z.number(), h: z.number(), angleDeg: z.number().optional(), gap: z.number().optional(), ...shapeOverrides }),
   /* 手写风文本标注：size 是字号 px（不是笔迹乘数），产出 texts 元素 */
   z.object({ shape: z.literal("text"), x: z.number(), y: z.number(), text: z.string().min(1).max(200), size: z.number().min(8).max(200).optional(), color: z.enum(SKETCH_COLORS).optional(), tool: z.enum(SKETCH_TOOLS).optional() }),
+  /* 复合符号 stencil：服务端按 kind 展开成一组原语笔迹（只产笔迹，label 自己用 text 标）。
+   * h 缺省 = w × STENCIL_ASPECT[kind]；units 仅 server 用（机架单元数，默认 3）。 */
+  z.object({
+    shape: z.literal("stencil"),
+    kind: z.enum(STENCIL_KINDS),
+    x: z.number(), y: z.number(), w: z.number(),
+    h: z.number().optional(),
+    units: z.number().int().min(1).max(8).optional(),
+    ...shapeOverrides,
+  }),
+  /* icon：直接用 looseleaf 真实 icon（name 见 icons 库），后端渲染成笔迹。x/y 是 icon 左上角 */
+  iconShapeSchema,
 ]);
 
 /** 角度单位为度：0° 指向 +x（右），正方向为顺时针（屏幕坐标系 y 向下的直观方向） */

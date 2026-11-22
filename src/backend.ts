@@ -59,6 +59,8 @@ const drawSchema = z.object({
   tool: z.enum(DRAW_TOOLS).optional(),
   color: z.enum(SKETCH_COLORS).optional(),
   size: sizeSchema.optional(),
+  /** 语义分组名：这批形状归入该组，以后按名擦/按名改（如 "数据库" "登录按钮"） */
+  group: z.string().min(1).max(40).optional(),
 });
 
 const putSchema = z.object({
@@ -172,8 +174,9 @@ export function startBackend(o: BackendOptions = {}): http.Server {
       }
       const { baseRev, strokes, texts } = parsed.data;
       /* 幂等去重：与当前完全相同（重复 PUT / 旧状态回流同一快照）不 bump rev、不进撤销栈 */
-      const incoming: CanvasContent = { strokes, texts: texts ?? st.doc.texts };
-      if (sameContent({ strokes: st.doc.strokes, texts: st.doc.texts }, incoming)) {
+      /* 页面 PUT 只覆盖 strokes/texts；groups 是 agent 专属语义，原样保留不被页面冲掉 */
+      const incoming: CanvasContent = { strokes, texts: texts ?? st.doc.texts, icons: st.doc.icons, groups: st.doc.groups };
+      if (sameContent({ strokes: st.doc.strokes, texts: st.doc.texts, icons: st.doc.icons, groups: st.doc.groups }, incoming)) {
         json(res, { id, rev: st.doc.rev, strokes: st.doc.strokes.length, texts: st.doc.texts.length, deduped: true });
         return;
       }
@@ -205,7 +208,7 @@ export function startBackend(o: BackendOptions = {}): http.Server {
         json(res, { error: parsed.error.issues[0]?.message ?? "参数不合法" }, 400);
         return;
       }
-      const { shapes, unit, tool, color, size } = parsed.data;
+      const { shapes, unit, tool, color, size, group } = parsed.data;
       let clamped = 0;
       const built = shapes.flatMap((s, i) => {
         const norm = unit === "norm" ? normalizeShape(s, st.doc.width, st.doc.height) : s;
@@ -222,9 +225,15 @@ export function startBackend(o: BackendOptions = {}): http.Server {
       });
       const strokes = built.flatMap((b) => b.strokes);
       const texts = built.flatMap((b) => b.texts);
+      const icons = built.flatMap((b) => b.icons);
       st.append(strokes, texts);
+      if (icons.length) st.addIcons(icons);
+      const strokeIds = strokes.map((s) => s.id);
+      const textIds = texts.map((t) => t.id);
+      const iconIds = icons.map((i) => i.id);
+      if (group) st.registerGroup(group, strokeIds, textIds, iconIds);
       broadcast(id);
-      json(res, { id, rev: st.doc.rev, added: strokes.length + texts.length, texts: texts.length, strokes: st.doc.strokes.length, textsTotal: st.doc.texts.length, clamped });
+      json(res, { id, rev: st.doc.rev, added: strokes.length + texts.length + icons.length, texts: texts.length, icons: icons.length, strokes: st.doc.strokes.length, textsTotal: st.doc.texts.length, clamped, strokeIds, textIds, iconIds, group: group ?? null });
       return;
     }
     /* stamp：追加 CLI 侧预编译好的笔迹（grid 等本地生成的形状），id/钳制由后端统一处理 */
@@ -247,6 +256,39 @@ export function startBackend(o: BackendOptions = {}): http.Server {
       json(res, { id, rev: st.doc.rev, added: strokes.length, strokes: st.doc.strokes.length, clamped });
       return;
     }
+    /* 按元素 id 删除笔迹/文本（agent 局部修正：undo 粒度是整次 draw，删单个元素用它） */
+    if (op === "remove" && method === "POST") {
+      const parsed = z
+        .object({
+          ids: z.array(z.string().min(1)).max(2000).optional(),
+          /** 按语义组名整组删除（与 ids 二选一/可叠加） */
+          name: z.string().min(1).max(40).optional(),
+        })
+        .refine((d) => (d.ids?.length ?? 0) > 0 || d.name, { message: "ids 或 name 至少给一个" })
+        .safeParse(body);
+      if (!parsed.success) {
+        json(res, { error: parsed.error.issues[0]?.message ?? "参数不合法" }, 400);
+        return;
+      }
+      let rs = { strokes: 0, texts: 0, icons: 0 };
+      let groupFound = false;
+      if (parsed.data.name) {
+        const g = st.removeGroup(parsed.data.name);
+        rs.strokes += g.strokes;
+        rs.texts += g.texts;
+        rs.icons += g.icons;
+        groupFound = g.found;
+      }
+      if (parsed.data.ids?.length) {
+        const r = st.remove(parsed.data.ids);
+        rs.strokes += r.strokes;
+        rs.texts += r.texts;
+        rs.icons += r.icons;
+      }
+      broadcast(id);
+      json(res, { id, rev: st.doc.rev, removedStrokes: rs.strokes, removedTexts: rs.texts, removedIcons: rs.icons, groupFound, strokes: st.doc.strokes.length, texts: st.doc.texts.length });
+      return;
+    }
     if (op === "undo" && method === "POST") {
       const parsed = countSchema.safeParse(body);
       const n = st.undo(parsed.success ? parsed.data.count : 1);
@@ -262,8 +304,7 @@ export function startBackend(o: BackendOptions = {}): http.Server {
       return;
     }
     if (op === "clear" && method === "POST") {
-      const n = st.doc.strokes.length + st.doc.texts.length;
-      st.replaceStrokes([], []);
+      const n = st.clearAll();
       broadcast(id);
       json(res, { id, rev: st.doc.rev, cleared: n });
       return;
@@ -310,6 +351,24 @@ export function startBackend(o: BackendOptions = {}): http.Server {
         const id = store.activeId;
         broadcast(id);
         json(res, { id, doc: st.doc, clients: clientCount(id) });
+        return;
+      }
+
+      /* 切换活动画布（store 级）：不带 id 的兼容路由正则会把它误判成画布级 op，先在这里截获 */
+      if (p === "/api/use" && req.method === "POST") {
+        const parsed = z
+          .object({ id: z.string().regex(/^\d{14}$/) })
+          .safeParse(JSON.parse(await readBody(req)));
+        if (!parsed.success) {
+          json(res, { error: parsed.error.issues[0]?.message ?? "参数不合法" }, 400);
+          return;
+        }
+        if (!store.get(parsed.data.id)) {
+          json(res, { error: `画布不存在：${parsed.data.id}` }, 404);
+          return;
+        }
+        store.activeId = parsed.data.id;
+        json(res, { id: store.activeId, active: store.activeId });
         return;
       }
 

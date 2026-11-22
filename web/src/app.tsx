@@ -41,6 +41,16 @@ interface DocState {
   size: number;
   strokes: SketchStroke[];
   texts: SketchText[];
+  icons?: SketchIcon[];
+}
+
+interface SketchIcon {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  size: number;
+  color: SketchColor;
 }
 
 interface CanvasMeta {
@@ -52,13 +62,13 @@ interface CanvasMeta {
 /** API 前缀：守护进程托管时走 __DAEMON_BASE__/sketchpad/api；vite dev 走 /sketchpad/api（代理）；其它同源相对路径 */
 const API = `${DAEMON_BASE}/sketchpad/api`;
 
-const LOCAL_DOC: DocState = { rev: 0, width: 1040, height: 620, tool: "felt", color: "ink", size: 1, strokes: [], texts: [] };
+const LOCAL_DOC: DocState = { rev: 0, width: 1040, height: 620, tool: "felt", color: "ink", size: 1, strokes: [], texts: [], icons: [] };
 
 /** 画布 id（YYYYMMDDHHmmss）→ 人类可读标签 */
 function canvasLabel(c: CanvasMeta): string {
   const d = c.id;
   const at = `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)} ${d.slice(8, 10)}:${d.slice(10, 12)}:${d.slice(12, 14)}`;
-  return `${at} · ${c.strokes} 笔`;
+  return at;
 }
 
 /** 每块画布的视口（平移+缩放）存 localStorage——不进文档，避免视口操作空转 rev */
@@ -114,7 +124,6 @@ function SketchpadPage() {
   const [canvases, setCanvases] = useState<CanvasMeta[]>([]);
   const [doc, setDoc] = useState<DocState | null>(null);
   const [offline, setOffline] = useState(false);
-  const [clients, setClients] = useState(0);
   /** 回放句柄：调 replay() 即按笔顺回放整幅画（每笔按几何长度分时长，非录制时的真实速度） */
   const apiRef = useRef<SketchpadHandle>(null);
   /** 无限画布视口（受控传给 Sketchpad；随画布 id 持久化到 localStorage） */
@@ -138,17 +147,36 @@ function SketchpadPage() {
 
   /* 视口随画布切换：载入该画布上次保存的视口；无保存时 autoFit 交画布首帧适配；变更即写回 localStorage */
   const [autoFit, setAutoFit] = useState(true);
+  // 视口写盘去抖：手势期间滚轮每帧都触发 updateView，同步 localStorage.setItem 会卡主线程
+  // （workflow 的 React Flow 内部持久化不在每帧 React 里）——按画布 id 暂存，手势停 300ms 才落盘
+  const pendingViews = useRef(new Map<string, SketchpadView>());
+  const viewSaveTimer = useRef(0);
+  const flushPendingViews = useCallback(() => {
+    pendingViews.current.forEach((v, id) => {
+      try {
+        localStorage.setItem(viewKey(id), JSON.stringify(v));
+      } catch {
+        /* 存不了就算了（隐私模式等），视口仍是会话内有效 */
+      }
+    });
+    pendingViews.current.clear();
+  }, []);
+  useEffect(
+    () => () => {
+      window.clearTimeout(viewSaveTimer.current);
+      flushPendingViews();
+    },
+    [flushPendingViews],
+  );
   const updateView = useCallback(
     (v: SketchpadView) => {
       setView(v);
       setAutoFit(false);
-      try {
-        localStorage.setItem(viewKey(canvasId), JSON.stringify(v));
-      } catch {
-        /* 存不了就算了（隐私模式等），视口仍是会话内有效 */
-      }
+      pendingViews.current.set(viewKey(canvasId), v);
+      window.clearTimeout(viewSaveTimer.current);
+      viewSaveTimer.current = window.setTimeout(flushPendingViews, 300);
     },
-    [canvasId],
+    [canvasId, flushPendingViews],
   );
   useEffect(() => {
     const saved = loadView(canvasId);
@@ -170,12 +198,11 @@ function SketchpadPage() {
         const want = canvasParam && list.canvases.some((c) => c.id === canvasParam) ? canvasParam : list.active;
         setCanvasId(want);
         if (want !== canvasParam) setSearchParams(want ? { c: want } : {}, { replace: true });
-        const { doc: d, clients: c } = await fetch(`${API}/canvases/${want}/doc`).then((r) => {
+        const { doc: d } = await fetch(`${API}/canvases/${want}/doc`).then((r) => {
           if (!r.ok) throw new Error(String(r.status));
           return r.json();
         });
         if (!alive) return;
-        setClients(c ?? 0);
         applyDoc(d);
       } catch {
         if (!alive) return;
@@ -202,8 +229,7 @@ function SketchpadPage() {
         if (rev === revRef.current) return;
         fetch(`${API}/canvases/${canvasId}/doc`)
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-          .then(({ doc: d, clients: c }: { doc: DocState; clients: number }) => {
-            setClients(c ?? 0);
+          .then(({ doc: d }: { doc: DocState }) => {
             applyDoc(d);
           })
           .catch(() => setOffline(true));
@@ -314,23 +340,13 @@ function SketchpadPage() {
   return (
     <main className="flex h-dvh flex-col">
       {/* 顶栏：workflow AppShell 同款磨砂条（纸色 + 铅笔发丝线），右侧画布切换/新建 */}
-      <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-3 border-b border-[var(--border)] bg-paper/40 px-6 backdrop-blur-md">
+      <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-3 border-b border-line bg-paper/40 px-6 backdrop-blur-md">
         <span className="flex items-center gap-2 text-[15px] text-ink">
           <LogoIcon />
           <span className="font-semibold">content-forge</span>
           <span className="text-ink-muted">/</span>
           <span className="text-ink-muted">sketchpad</span>
         </span>
-        {offline ? (
-          <p className="text-xs text-muted-foreground">
-            画板后端未连接（直连模式或服务未启动），当前为本地模式：笔迹只保存在本页内存。
-          </p>
-        ) : (
-          <p className="ml-4 truncate text-xs text-muted-foreground">
-            rev {doc.rev}
-            {clients > 0 ? ` · ${clients} 个页面在线` : ""} · agent 可经 sketchpad MCP 带同一画布 id 作画
-          </p>
-        )}
         {!offline && (
           <LlSelect
             value={canvasId ?? undefined}
@@ -371,6 +387,7 @@ function SketchpadPage() {
           replaySpeed={replaySpeed}
           value={doc.strokes}
           texts={doc.texts}
+          icons={doc.icons}
           onValueChange={pushStrokes}
           tool={doc.tool}
           onToolChange={(tool) => pushPrefs({ tool })}
@@ -423,27 +440,12 @@ function SketchpadPage() {
                   <SketchpadRedo />
                   <SketchpadClear>清空</SketchpadClear>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Button variant="ghost" size="sm" type="button" onClick={() => apiRef.current?.zoomBy(1 / 1.2)} title="缩小（快捷键 -）">
-                    −
-                  </Button>
-                  <button
-                    type="button"
-                    className="text-xs text-muted-foreground tabular-nums hover:text-foreground"
-                    onClick={() => apiRef.current?.fitHome()}
-                    title="缩放百分比，点击回到首页画框（快捷键 0）"
-                  >
-                    {Math.round(view.zoom * 100)}%
-                  </button>
-                  <Button variant="ghost" size="sm" type="button" onClick={() => apiRef.current?.zoomBy(1.2)} title="放大（快捷键 +）">
-                    +
-                  </Button>
-                </div>
               </SketchpadToolbar>
             )}
           </div>
-          {/* 无限画布：满铺面板，滚轮平移 / ctrl+滚轮缩放 / 中键或 Space 拖拽平移；首页画纸固定在原点 */}
-          <SketchpadCanvas className="min-h-0 flex-1" paper="dots" label="Sketchpad" autoFit={autoFit} />
+          {/* 无限画布：满铺固定 dot-grid 纸面桌（与 workflow 图页完全同款），滚轮平移 /
+              ctrl+滚轮缩放 / 中键或 Space 拖拽平移；首页画框只剩 norm 坐标参照 */}
+          <SketchpadCanvas className="min-h-0 flex-1" label="Sketchpad" autoFit={autoFit} />
         </Sketchpad>
       </div>
     </main>
