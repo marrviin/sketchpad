@@ -33,6 +33,7 @@ import {
   type SketchSizeName,
   type SketchStroke,
   type SketchTool,
+  type StrokeMarkup,
 } from "@content-forge/ink/recipes/sketchpad-ink"
 import { svgToPngDataUrl } from "@/lib/sketch-export"
 import { cn } from "@/lib/utils"
@@ -71,7 +72,7 @@ export interface SketchpadView {
 }
 
 export const ZOOM_MIN = 0.05
-export const ZOOM_MAX = 4
+export const ZOOM_MAX = 3
 /** 缩放落点吸附的 ln 网格步长（ln 0.02 ≈ 2% 步），与 workflow 图页同款——
  *  静止缩放稳定在网格上，同样的缩放比重复出现时渲染可复用；限制的是分辨率不是速度 */
 export const ZOOM_STEP_LN = 0.02
@@ -147,6 +148,8 @@ interface SketchpadContextValue {
   viewportApiRef: React.RefObject<{ zoomBy(factor: number): void; fitHome(): void } | null>
   tool: SketchTool
   tools: readonly SketchTool[]
+  /** 查看器模式：指针一律拖拽平移（grab 手型），禁用指针/键盘手绘 */
+  panMode: boolean
   color: SketchColor
   size: number
   readOnly: boolean
@@ -204,6 +207,8 @@ type SketchpadProps = Omit<React.ComponentProps<"div">, "onChange" | "defaultVal
   /** 无限画布视口（受控；缺省内部维护 {x:0,y:0,zoom:1}） */
   view?: SketchpadView
   onViewChange?: (v: SketchpadView) => void
+  /** 查看器模式：指针一律拖拽平移（grab 手型），禁用指针/键盘手绘 */
+  panMode?: boolean
   readOnly?: boolean
   disabled?: boolean
   replay?: boolean
@@ -235,6 +240,7 @@ function Sketchpad({
   height = 400,
   view: viewProp,
   onViewChange,
+  panMode = false,
   readOnly = false,
   disabled = false,
   replay = false,
@@ -414,6 +420,7 @@ function Sketchpad({
     viewportApiRef,
     tool,
     tools,
+    panMode,
     color,
     size,
     readOnly,
@@ -716,9 +723,36 @@ interface ReplayTiming {
   dur: number
 }
 
-const StrokeShape = React.memo(function StrokeShape({ stroke, dim, replay, maskId }: { stroke: SketchStroke; dim: boolean; replay: ReplayTiming | null; maskId: string }) {
-  const tier = useInkTier()
-  const m = strokeMarkup(stroke, { tier })
+/** 可视世界矩形（norm 于世界坐标，含边距），用于视口裁剪 */
+interface ViewRect {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+}
+
+/** bbox 与可视世界矩形相交测试（含相切） */
+function bboxVisible(r: ViewRect, b: readonly [number, number, number, number]): boolean {
+  return b[2] >= r.x0 && b[0] <= r.x1 && b[3] >= r.y0 && b[1] <= r.y1
+}
+
+/** 文本按左上角 + 近似包络（中文 ≈ 1em/字，混合文本取 0.8em 估计宽）测试可视性 */
+function textVisible(r: ViewRect, t: SketchText): boolean {
+  const w = t.text.length * t.size * 0.8
+  return t.x + w >= r.x0 && t.x <= r.x1 && t.y + t.size >= r.y0 && t.y <= r.y1
+}
+
+/** ink markup 内嵌的 draw-reveal mask（dashoffset=0 恒等于全显）：那是独立查看器
+ *  开笔动画用的；页面回放走自己外建的 maskId 包裹，静态渲染留着它 = 每笔多 1 次
+ *  mask 栅格化 + 每个 fill 层 1 次被遮罩合成。剥掉定义与引用，视觉不变、落定
+ *  重栅格化显著变便宜 */
+const DRAW_MASK_DEF_RE = /<mask id="ll-draw-[^"]*"[^>]*>[\s\S]*?<\/mask>/g
+const DRAW_MASK_REF_RE = / mask="url\(#ll-draw-[^"]*\)"/g
+function stripDrawMasks(svg: string): string {
+  return svg.replace(DRAW_MASK_DEF_RE, "").replace(DRAW_MASK_REF_RE, "")
+}
+
+const StrokeShape = React.memo(function StrokeShape({ stroke, m, dim, replay, maskId }: { stroke: SketchStroke; m: StrokeMarkup; dim: boolean; replay: ReplayTiming | null; maskId: string }) {
   const style = dim ? { opacity: 0.22 } : undefined
   if (!replay) return <g data-stroke={stroke.id} style={style} dangerouslySetInnerHTML={{ __html: m.svg }} />
   // mask 按笔迹自身 bbox 定界（无界画布下不能再用固定 W×H 大 mask——userSpaceOnUse mask 是光栅化的）
@@ -810,6 +844,7 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
   /** 世界锚定层 ref（与 surface svg 成对）：手势期 transform 直写 DOM，见 applyViewDom */
   const worldRef = React.useRef<HTMLDivElement | null>(null)
   const interactive = !ctx.readOnly && !ctx.disabled
+  const panMode = ctx.panMode
 
   // Space 按住 = 平移（Figma 惯例）；画布聚焦时键盘落笔改由 Enter 承担（onKey 里的 Space 分支已移除）。
   // 只在 sketchpad 作用域内生效，不干扰其他输入框/按钮的 Space 行为。
@@ -840,6 +875,44 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
   // wheel/pan 处理器里同步读视口，绕开 effect 闭包
   const viewRef = React.useRef(view)
   viewRef.current = view
+  const [pane, setPane] = React.useState<[number, number]>([W, H])
+  const paneRef = React.useRef<[number, number]>(pane)
+  paneRef.current = pane
+
+  /* 视口层几何（"慢提交"双轨）：svg 布局恒等于面板，内容缩放比由 viewBox 承担。
+     viewBox 是重栅格化触发器——每次变都整层换栅格（dpr2 全画布 ~200ms），
+     若随每次 settle 即时变更，"缩放后紧跟平移"就会跟栅格积压抢帧 = 卡顿。
+     所以 viewBox 慢提交：只在交互空闲 350ms 后更新；期间的一切缩放/平移由元素
+     transform 精确补偿——绘制映射 page = tx + (wx-vx0)·zw·k，令
+     tx = view.x + vx0·z、k = z/zw 即与正确映射 page = view.x + wx·z 完全等价
+     （vx0/vy0/zw = 已提交 viewBox 原点与世界比），合成器期间零重栅格化。
+     代价：缩小手势中边缘短暂欠绘制，≤350ms 后提交补齐。 */
+  // committed 用初始视口惰性初始化：否则保存视口（≠ {0,0,1}）加载 350ms 后必触发一次
+  // 多余的整层重栅格（第二波"上半先出来"的来源）
+  const [committed, setCommitted] = React.useState<{ vx: number; vy: number; zw: number }>(() => {
+    const z0 = view.zoom || 1
+    return { vx: -view.x / z0, vy: -view.y / z0, zw: z0 }
+  })
+  const committedRef = React.useRef(committed)
+  committedRef.current = committed
+  const commitTimer = React.useRef(0)
+  React.useEffect(() => {
+    const atSchedule = viewRef.current
+    const commit = () => {
+      const v = viewRef.current
+      // 提交前交互又在进行（viewRef 相对调度时已变）：顺延，避免在手势中途触发重栅格化
+      if (v !== atSchedule) {
+        commitTimer.current = window.setTimeout(commit, 350)
+        return
+      }
+      // zw 是绘制映射的自由参数（tx/k 补偿保证任意 zw 下映射正确），钳在温和区间
+      // 避免 viewBox 出现巨型坐标（疑似触发 Skia 慢栅格路径）
+      const zw = Math.min(3, Math.max(0.5, v.zoom || 1))
+      setCommitted({ vx: -v.x / zw, vy: -v.y / zw, zw })
+    }
+    commitTimer.current = window.setTimeout(commit, 350)
+    return () => window.clearTimeout(commitTimer.current)
+  }, [view, pane])
 
   /** 手势期直写 DOM transform（与 workflow 的 d3 同款）：wheel 平移/缩放与拖拽 pan 的
    *  每帧更新不再走 React setState——否则每帧触发整树 reconciliation + localStorage，
@@ -847,13 +920,56 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
    *  手势结束时由调用方 setView(一次) 同步 React state 与持久化 */
   const applyViewDom = React.useCallback((v: SketchpadView) => {
     viewRef.current = v
-    const t = `translate(${v.x}px, ${v.y}px) scale(${v.zoom})`
+    const z = v.zoom || 1
+    const c = committedRef.current
+    const k = z / (c.zw || 1)
+    const t = `translate(${v.x + c.vx * z}px, ${v.y + c.vy * z}px) scale(${k})`
     if (surface.current) surface.current.style.transform = t
     if (worldRef.current) worldRef.current.style.transform = t
   }, [])
-  const [pane, setPane] = React.useState<[number, number]>([W, H])
-  const paneRef = React.useRef<[number, number]>(pane)
-  paneRef.current = pane
+
+  // markup（含 bbox）提升到父级算好下发：视口裁剪和内容自适应都要用 bbox，
+  // StrokeShape 也不再重复计算；svg 剥掉内嵌 draw mask（见 stripDrawMasks 注释）
+  // LOD：缩小视图（z<0.9）时笔迹降级为 lo 档 markup（点数约减半，栅格提速）——
+  // 缩小视图下整幅画布可见、笔迹很小，降级视觉无感；跨过阈值时按档位重算 markup
+  const strokeTier = view.zoom < 0.9 ? "lo" : tier
+  const strokeInfos = React.useMemo(
+    () =>
+      ctx.strokes.map((s) => {
+        const raw = strokeMarkup(s, { tier: strokeTier })
+        return { s, m: { ...raw, svg: stripDrawMasks(raw.svg) } }
+      }),
+    [ctx.strokes, strokeTier],
+  )
+
+  /** 内容包围盒（笔迹/文本/icon ∪ 首页画框）——fitHome 的取景目标，与 snapshot 同法 */
+  const contentBbox = React.useMemo<[number, number, number, number]>(() => {
+    let bx0 = 0, by0 = 0, bx1 = W, by1 = H
+    for (const { m } of strokeInfos) {
+      bx0 = Math.min(bx0, m.bbox[0]); by0 = Math.min(by0, m.bbox[1])
+      bx1 = Math.max(bx1, m.bbox[2]); by1 = Math.max(by1, m.bbox[3])
+    }
+    for (const t of ctx.texts) {
+      bx0 = Math.min(bx0, t.x); by0 = Math.min(by0, t.y)
+      bx1 = Math.max(bx1, t.x + t.text.length * t.size * 0.8); by1 = Math.max(by1, t.y + t.size)
+    }
+    for (const ic of ctx.icons) {
+      bx0 = Math.min(bx0, ic.x); by0 = Math.min(by0, ic.y)
+      bx1 = Math.max(bx1, ic.x + ic.size); by1 = Math.max(by1, ic.y + ic.size)
+    }
+    return [bx0, by0, bx1, by1]
+  }, [strokeInfos, ctx.texts, ctx.icons])
+
+  /** 取景内容包围盒（留 80px 边距），缩放上限内尽量铺满面板 */
+  const fitContent = React.useCallback((pw: number, ph: number) => {
+    const [bx0, by0, bx1, by1] = contentBbox
+    const bw = Math.max(1, bx1 - bx0)
+    const bh = Math.max(1, by1 - by0)
+    const z = clampZoom(Math.min((pw - 80) / bw, (ph - 80) / bh, ZOOM_MAX))
+    setView({ x: (pw - bw * z) / 2 - bx0 * z, y: (ph - bh * z) / 2 - by0 * z, zoom: z })
+  }, [contentBbox])
+  const fitContentRef = React.useRef(fitContent)
+  fitContentRef.current = fitContent
 
   React.useEffect(
     () => () => {
@@ -865,24 +981,27 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
   React.useEffect(() => {
     const el = ctx.canvasRef.current
     if (!el || typeof ResizeObserver === "undefined") return
-    let fitted = false
     const ro = new ResizeObserver(() => {
       const r = el.getBoundingClientRect()
       if (!r.width || !r.height) return
       setPane([r.width, r.height])
-      // 首帧自动适配首页画框：仅在无保存视口（autoFit 且视口还是原点默认）时执行一次
-      const v = viewRef.current
-      if (autoFit && !fitted && v.x === 0 && v.y === 0 && v.zoom === 1) {
-        fitted = true
-        const z = clampZoom(Math.min((r.width - 80) / W, (r.height - 80) / H, ZOOM_MAX))
-        setView({ x: (r.width - W * z) / 2, y: (r.height - H * z) / 2, zoom: z })
-      }
     })
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
 
-  // 视口操作：面板中心锚定缩放 / 回到首页画框（挂到 ctx 供 apiRef 转发）
+  // 自动适配内容包围盒：autoFit 且视口仍是默认原点时随内容变化重新取景——
+  // 文档晚于首帧到达（先适配了空首页框）也能在内容到位后正确框住全部内容
+  React.useEffect(() => {
+    if (!autoFit) return
+    const v = viewRef.current
+    if (v.x !== 0 || v.y !== 0 || v.zoom !== 1) return
+    const [pw, ph] = paneRef.current
+    if (!pw || !ph) return
+    fitContent(pw, ph)
+  }, [autoFit, fitContent])
+
+  // 视口操作：面板中心锚定缩放 / 回到内容取景（挂到 ctx 供 apiRef 转发）
   React.useEffect(() => {
     ctx.viewportApiRef.current = {
       zoomBy: (factor) => {
@@ -893,8 +1012,7 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
       },
       fitHome: () => {
         const [pw, ph] = paneRef.current
-        const z = clampZoom(Math.min((pw - 80) / W, (ph - 80) / H, ZOOM_MAX))
-        setView({ x: (pw - W * z) / 2, y: (ph - H * z) / 2, zoom: z })
+        fitContentRef.current(pw, ph)
       },
     }
     return () => {
@@ -1054,8 +1172,8 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
     onPointerDown?.(e)
     if (!interactive || e.defaultPrevented) return
     const type = e.pointerType || "mouse"
-    // 中键 / Space+左键 = 平移（仅鼠标；画笔/触摸仍是绘制）
-    const wantPan = type === "mouse" && ((e.button ?? 0) === 1 || spaceRef.current)
+    // panMode（查看器）：指针一律拖拽平移；中键 / Space+左键 = 平移（仅鼠标；画笔/触摸仍是绘制）
+    const wantPan = panMode || (type === "mouse" && ((e.button ?? 0) === 1 || spaceRef.current))
     if (type === "mouse" && (e.button ?? 0) !== 0 && !wantPan) return
     if (type === "pen") {
       penSeen.current = e.timeStamp
@@ -1148,6 +1266,8 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
       return
     }
     if (!interactive || mod || e.altKey && !k.startsWith("Arrow") || e.target !== e.currentTarget) return
+    // 查看器模式：禁键盘落笔（Enter）；工具/宽度键无实际效果，保留 0（取景）/ +-（缩放）
+    if (panMode && k === "Enter") return
     const tool = KEY_TOOL[k.toLowerCase()]
     if (tool && k.length === 1) {
       if (ctx.tools.includes(tool)) {
@@ -1217,8 +1337,23 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
       return r
     })
   }, [ctx.replaying, ctx.strokes, ctx.replaySpeed, tier])
-  const liveMarkup = React.useMemo(() => (live ? strokeMarkup(live, { tier, live: true }).svg : ""), [live, tier])
+  const liveMarkup = React.useMemo(() => (live ? stripDrawMasks(strokeMarkup(live, { tier, live: true }).svg) : ""), [live, tier])
   const cursorSvg = React.useMemo(() => cursorMarkup(uid), [uid])
+
+  // 视口裁剪：settle 时合成器要按新缩放比整层重栅格化，每笔 = 3 条被 mask 的 path + 笔刷
+  // 纹理 mask，成本随缩放平方增长——屏幕外的笔迹/文本根本不进 DOM，栅格化只付可见部分。
+  // 手势期 DOM 直写不重渲染，落定 setView 时才换裁剪窗口（25% 边距覆盖小步平移）；
+  // 回放（timing 非空）关闭裁剪，回放要全画布按笔顺播
+  const viewRect = React.useMemo<ViewRect>(() => {
+    const [pw, ph] = pane
+    const z = view.zoom || 1
+    const x0 = -view.x / z
+    const y0 = -view.y / z
+    const x1 = (pw - view.x) / z
+    const y1 = (ph - view.y) / z
+    const m = Math.max(x1 - x0, y1 - y0) * 0.15 + 60
+    return { x0: x0 - m, y0: y0 - m, x1: x1 + m, y1: y1 + m }
+  }, [view, pane])
 
   const a11y = interactive
     ? ({ role: "application", "aria-roledescription": "drawing canvas", "aria-label": label, "aria-describedby": help, tabIndex: 0 } as const)
@@ -1229,6 +1364,7 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
   return (
     <div
       data-slot="sketchpad-canvas"
+      data-panmode={panMode ? "" : undefined}
       data-tool={interactive ? ctx.tool : undefined}
       data-drawing={live ? "" : undefined}
       ref={useMergedRef<HTMLDivElement>(hostRef, ref, ctx.canvasRef)}
@@ -1241,7 +1377,7 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
       onLostPointerCapture={onLost}
       onKeyDown={onKey}
       onBlur={dropKeyboard}
-      className={cn("relative isolate touch-none select-none overflow-hidden", interactive ? (ctx.tool === "eraser" ? "cursor-cell" : "cursor-crosshair") : "cursor-default", className)}
+      className={cn("relative isolate touch-none select-none overflow-hidden", panMode ? "cursor-grab" : interactive ? (ctx.tool === "eraser" ? "cursor-cell" : "cursor-crosshair") : "cursor-default", className)}
       style={styleProp}
       {...props}
     >
@@ -1249,48 +1385,53 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
       {/* dot-grid 纸面桌：与 workflow 图页完全同款——固定满铺 looseleaf Paper（真纸面：
           底色 + 纤维纹理 + 手绘感点阵），不随视口平移缩放，笔迹/节点像纸片一样在桌面上移动 */}
       <Paper stock="dot-grid" tilt={false} shadow="none" className="absolute inset-0" aria-hidden />
-      {/* 世界锚定层：children 随视口平移缩放（世界原点 = 首页画框 W×H 左上角，
-          只剩坐标意义——norm 0~1 与 fitHome/快捷键 0 的回位目标） */}
+      {/* 世界锚定层：children 随视口平移缩放。几何与 surface 同构（布局 = 面板、
+          transform 见上方"视口层几何"注释）；children 坐标以已提交窗口原点为基准——
+          children 若用绝对世界坐标，需按 committed 原点偏移换算 */}
       <div
         ref={worldRef}
         data-slot="sketchpad-world"
         className="absolute left-0 top-0 origin-top-left"
-        style={{ width: W, height: H, transform: `translate(${view.x}px, ${view.y}px) scale(${z})` }}
+        style={{ width: pane[0], height: pane[1], transform: `translate(${view.x + committed.vx * z}px, ${view.y + committed.vy * z}px) scale(${z / (committed.zw || 1)})` }}
       >
         {children}
       </div>
-      {/* 视口变换画在 svg 元素自身的 CSS transform 上（不是内部 <g> 属性）：SVG 内部变换每帧
-          重栅格化全部矢量笔迹，元素级 CSS transform 才能被 GPU 合成——配合手势期的
-          data-gesturing 图层提升（见 styles.css），缩放/平移手势中零主线程重绘，与 workflow 同法 */}
+      {/* 内容缩放比由 viewBox 承担且慢提交（见上方"视口层几何"注释）：布局恒等于面板，
+          元素框恒覆盖视口、栅格面积恒定；交互期由元素 transform 精确补偿 */}
       <svg
         ref={surface}
         data-slot="sketchpad-surface"
         aria-hidden="true"
         focusable="false"
-        className="pointer-events-none absolute inset-0 size-full forced-color-adjust-none"
-        style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${z})`, transformOrigin: "0 0" }}
+        className="pointer-events-none absolute left-0 top-0 forced-color-adjust-none"
+        viewBox={`${committed.vx} ${committed.vy} ${pane[0] / (committed.zw || 1)} ${pane[1] / (committed.zw || 1)}`}
+        style={{ width: pane[0], height: pane[1], transform: `translate(${view.x + committed.vx * z}px, ${view.y + committed.vy * z}px) scale(${z / (committed.zw || 1)})`, transformOrigin: "0 0" }}
       >
         {ctx.texts.length > 0 && (
           <g data-slot="sketchpad-texts">
-            {ctx.texts.map((t) => (
-              <text
-                key={t.id}
-                data-text={t.id}
-                x={t.x}
-                y={t.y + t.size * TEXT_BASELINE_K}
-                fill={`var(--ll-${t.color})`}
-                style={{ fontFamily: TEXT_FONT, fontSize: t.size }}
-              >
-                {t.text}
-              </text>
-            ))}
+            {ctx.texts.map((t) =>
+              timing || textVisible(viewRect, t) ? (
+                <text
+                  key={t.id}
+                  data-text={t.id}
+                  x={t.x}
+                  y={t.y + t.size * TEXT_BASELINE_K}
+                  fill={`var(--ll-${t.color})`}
+                  style={{ fontFamily: TEXT_FONT, fontSize: t.size }}
+                >
+                  {t.text}
+                </text>
+              ) : null,
+            )}
           </g>
         )}
         {ctx.icons.length > 0 && <DocIconsLayer icons={ctx.icons} />}
         <g data-slot="sketchpad-strokes" key={ctx.replayKey}>
-          {ctx.strokes.map((s, i) => (
-            <StrokeShape key={s.id} stroke={s} dim={erasing.has(s.id)} replay={timing?.[i] ?? null} maskId={`ll-replay-${uid}-${i}`} />
-          ))}
+          {strokeInfos.map(({ s, m }, i) =>
+            timing || bboxVisible(viewRect, m.bbox) ? (
+              <StrokeShape key={s.id} stroke={s} m={m} dim={erasing.has(s.id)} replay={timing?.[i] ?? null} maskId={`ll-replay-${uid}-${i}`} />
+            ) : null,
+          )}
         </g>
         {live ? <g data-slot="sketchpad-live" dangerouslySetInnerHTML={{ __html: liveMarkup }} /> : null}
         {cursor ? <g data-slot="sketchpad-cursor" transform={`translate(${cursor[0]} ${cursor[1]})`} dangerouslySetInnerHTML={{ __html: cursorSvg }} /> : null}

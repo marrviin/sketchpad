@@ -2,3 +2,6 @@ onlyBuiltDependencies:
   - esbuild
   - '@resvg/resvg-js'
   - '@tailwindcss/oxide'
+minimumReleaseAgeExclude:
+  - '@content-forge/daemon@0.1.0'
+  - '@content-forge/ink@0.1.0'

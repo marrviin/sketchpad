@@ -13,13 +13,6 @@ import type { SketchColor, SketchStroke, SketchText, SketchTool, SketchpadView }
 import {
   Sketchpad,
   SketchpadCanvas,
-  SketchpadClear,
-  SketchpadColors,
-  SketchpadRedo,
-  SketchpadSizes,
-  SketchpadToolbar,
-  SketchpadTools,
-  SketchpadUndo,
   clampZoom,
   type SketchpadHandle,
 } from "@/components/ui/sketchpad";
@@ -97,15 +90,6 @@ function PlusIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-/** 折叠工具栏的把手图标（铅笔，内联 SVG 避免跨 app 引用） */
-function PencilIcon({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-    </svg>
-  );
-}
-
 /** content-forge 套件 logo（workflow AppShell 同形，内联避免跨 app 引用） */
 function LogoIcon({ size = 22 }: { size?: number }) {
   return (
@@ -124,14 +108,18 @@ function SketchpadPage() {
   const [canvases, setCanvases] = useState<CanvasMeta[]>([]);
   const [doc, setDoc] = useState<DocState | null>(null);
   const [offline, setOffline] = useState(false);
+  /** 首屏揭示门：文档首次渲染的栅格按瓦片自上而下逐块上屏（浏览器行为，控制不了顺序），
+   *  期间把笔迹层藏住、栅格完成后原子显现，避免"上半先出来"的渐进观感。
+   *  只在加载/切换画布时触发；期间 agent 的增量笔迹照常即时可见 */
+  const [canvasRevealed, setCanvasRevealed] = useState(false);
+  /** 已做过揭示门的画布 id：同一画布内 agent 增量更新不重新触发揭示 */
+  const revealedFor = useRef<string | null>(null);
   /** 回放句柄：调 replay() 即按笔顺回放整幅画（每笔按几何长度分时长，非录制时的真实速度） */
   const apiRef = useRef<SketchpadHandle>(null);
   /** 无限画布视口（受控传给 Sketchpad；随画布 id 持久化到 localStorage） */
   const [view, setView] = useState<SketchpadView>(HOME_VIEW);
-  /** 回放倍速：组件按此分母缩短每笔时长；回放中切换会让动画按新时长重排（当前位置跳变） */
-  const [replaySpeed, setReplaySpeed] = useState(1);
-  /** 左侧工具栏折叠态：默认收起，点把手展开 */
-  const [railOpen, setRailOpen] = useState(false);
+  /** 回放倍速：组件按此分母缩短每笔时长（查看器模式无 UI 入口，保持 1×） */
+  const replaySpeed = 1;
   /** 已知的服务端 rev：自己的变更由 PUT/POST 响应先行更新，SSE 里相同的 rev 不再回流拉取 */
   const revRef = useRef(-1);
   /** 本地已知的文本元素（agent-only；PUT 回流时随 payload 原样带回，清空时置 []） */
@@ -240,6 +228,26 @@ function SketchpadPage() {
       es.close();
     };
   }, [offline, canvasId, applyDoc]);
+
+  /* 首屏揭示门：内容（笔迹/文本）首次到位后藏住笔迹层 450ms——瓦片栅格化在这段窗口内
+     完成，揭示时原子显现。同一画布只门一次（agent 增量更新不重门）；换画布重门；
+     空画布（无笔迹可栅格）直接显现 */
+  const hasContent = (doc?.strokes.length ?? 0) > 0 || (doc?.texts.length ?? 0) > 0;
+  useEffect(() => {
+    const key = canvasId ?? "local";
+    if (revealedFor.current !== key) {
+      // 新画布：先进入 pending（内容未到也要藏住，防止内容到达瞬间可见渐进栅格）
+      revealedFor.current = key;
+      setCanvasRevealed(false);
+    }
+    if (!hasContent) {
+      // 文档已到但确为空画布：无需遮罩
+      if (doc || offline) setCanvasRevealed(true);
+      return;
+    }
+    const t = window.setTimeout(() => setCanvasRevealed(true), 450);
+    return () => window.clearTimeout(t);
+  }, [hasContent, canvasId, doc, offline]);
 
   /** 本页笔迹变更（画一笔/擦除/撤销/重做/清空）→ 全量 PUT 覆盖（带 baseRev 乐观锁，按画布）。
    *  文本元素（agent-only）随 PUT 原样回流：清空时置 []，其余场景沿用本地已知值。
@@ -378,6 +386,7 @@ function SketchpadPage() {
       <div className="relative min-h-0 flex-1">
         <Sketchpad
           className="absolute inset-0"
+          data-canvas-revealed={canvasRevealed ? "ready" : "pending"}
           width={doc.width}
           height={doc.height}
           view={view}
@@ -385,6 +394,7 @@ function SketchpadPage() {
           seed={`cf-sketchpad-${canvasId ?? "local"}`}
           apiRef={apiRef}
           replaySpeed={replaySpeed}
+          panMode
           value={doc.strokes}
           texts={doc.texts}
           icons={doc.icons}
@@ -396,55 +406,7 @@ function SketchpadPage() {
           size={doc.size}
           onSizeChange={(size) => pushPrefs({ size })}
         >
-          {/* 左侧折叠工具栏：默认收起，点把手展开；绝对定位悬浮在画布上 */}
-          <div className="absolute left-3 top-3 z-10 flex flex-col items-start gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              type="button"
-              aria-expanded={railOpen}
-              onClick={() => setRailOpen((o) => !o)}
-              title={railOpen ? "收起工具栏" : "展开工具栏"}
-            >
-              <PencilIcon />
-              工具
-            </Button>
-            {railOpen && (
-              <SketchpadToolbar className="w-[248px] flex-col !items-stretch gap-3 p-3 shadow-xl">
-                <SketchpadTools />
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                  <SketchpadColors />
-                  <SketchpadSizes />
-                </div>
-                <div className="h-px w-full bg-[var(--border)]" aria-hidden />
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    type="button"
-                    disabled={!doc.strokes.length}
-                    onClick={() => apiRef.current?.replay()}
-                  >
-                    回放
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    type="button"
-                    onClick={() => setReplaySpeed((s) => (s === 0.5 ? 1 : s === 1 ? 2 : s === 2 ? 4 : 0.5))}
-                    title="回放倍速（点击切换 0.5× → 1× → 2× → 4×）"
-                  >
-                    {replaySpeed}×
-                  </Button>
-                  <SketchpadUndo />
-                  <SketchpadRedo />
-                  <SketchpadClear>清空</SketchpadClear>
-                </div>
-              </SketchpadToolbar>
-            )}
-          </div>
-          {/* 无限画布：满铺固定 dot-grid 纸面桌（与 workflow 图页完全同款），滚轮平移 /
-              ctrl+滚轮缩放 / 中键或 Space 拖拽平移；首页画框只剩 norm 坐标参照 */}
+          {/* 查看器模式：页面只负责展示与导航（拖拽/滚轮），内容全部经 agent 操作 */}
           <SketchpadCanvas className="min-h-0 flex-1" label="Sketchpad" autoFit={autoFit} />
         </Sketchpad>
       </div>

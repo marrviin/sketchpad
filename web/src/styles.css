@@ -23,10 +23,26 @@ body {
   --color-line: #d0d7de;
 }
 
-/* 缩放手势期的图层提升（workflow .flow-gesturing 同款）：滚轮/捏合缩放中把视口层
-   提升为合成器纹理，每帧只做 GPU scale+translate（零主线程重绘）；手势结束 300ms 后
-   移除 will-change，触发一次最终尺度的重栅格化变清晰。属性由 SketchpadCanvas 增删 */
-[data-slot="sketchpad-canvas"][data-gesturing] [data-slot="sketchpad-surface"],
-[data-slot="sketchpad-canvas"][data-gesturing] [data-slot="sketchpad-world"] {
+/* 视口层常驻提升（不再按手势期摘挂）：手势开始才提升的话，每次手势起点——包括
+   平移——都要按当前缩放比整层重栅格化一遍，高倍缩放下就是可感的起手延迟；
+   常驻提升后平移 tiles 完全复用（零栅格化），只有缩放换级别时付一次重栅格化。
+   大视网膜屏（2x）下常驻层内存 ≈ 视口×dpr×4B×2 层，桌面端可接受 */
+[data-slot="sketchpad-surface"],
+[data-slot="sketchpad-world"] {
   will-change: transform;
+}
+
+/* 查看器模式：默认拖拽手型，手势中切换抓取 */
+[data-slot="sketchpad-canvas"][data-panmode] {
+  cursor: grab;
+}
+[data-slot="sketchpad-canvas"][data-panmode][data-gesturing] {
+  cursor: grabbing;
+}
+
+/* 首屏揭示门（见 app.tsx 首屏揭示门注释）：文档首帧的瓦片栅格化按瓦片自上而下逐块
+   上屏，浏览器层面控制不了顺序——藏住笔迹层等栅格完成，揭示时原子显现。
+   0.01 而非 0：opacity 0 的层会被合成器跳过栅格，揭示时反而又能看到渐进过程 */
+[data-slot="sketchpad"][data-canvas-revealed="pending"] [data-slot="sketchpad-surface"] {
+  opacity: 0.01;
 }
