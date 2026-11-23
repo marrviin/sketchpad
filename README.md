@@ -27,6 +27,12 @@ agent 的每一笔经 SSE 秒级出现在页面。开一个浏览器窗口挂在
 **snapshot 自查回路**
 `sketchpad snapshot` 把画布渲染成 PNG 给 agent 自己看——画 → 自查 → 修正，agent 不需要问你「画得怎么样」，画错了自己 `undo` 重来。
 
+**场景构图：画得好是算法保证，不是模型自觉**
+流程图、时序图、原型骨架这些结构化场景，agent 给结构化描述（节点/连线/参与者/分区），`sketchpad compose` 内置确定性布局一次成图——节点按文字宽度自适应、对齐与间距由算法保证、连线自动贴边、回退边自动绕行。agent 再在手绘细节上自由发挥，骨架不会乱。
+
+**lint 自查回路**
+`sketchpad snapshot` 渲染 PNG 给 agent 目测，`sketchpad lint` 把「画得不好」的可计算信号变成清单——文本重叠、文字压在框线/箭头上、内容出框，返回元素 id，agent 直接删掉重画。画 → lint → snapshot → 修正，质量闭环不靠运气。
+
 **叙事层级 + 回放**
 agent 作画时给每批笔迹带 `group` + `order`（1 画布 → 2 骨架 → 3 主内容 → 4 次级 → 5 标注），页面右键「回放」或 `?replay=1` 按叙事层级逐组铺开、组间停顿——像有人在你面前讲产品，而不是乱画一通。画完顺序不对？`sketchpad order` 事后修序，不用重画。
 
@@ -38,7 +44,9 @@ agent 作画时给每批笔迹带 `group` + `order`（1 画布 → 2 骨架 → 
 ```bash
 sketchpad ui              # 拉起服务，打印页面地址，浏览器打开
 sketchpad new             # 新建画布
-sketchpad draw '{"unit":"norm","shapes":[…]}'   # agent 一批形状/文本，页面实时看到
+sketchpad compose @flow.json    # 场景构图：结构骨架一次成图（flow/sequence/wireframe）
+sketchpad draw '{"unit":"norm","shapes":[…]}'   # agent 手绘细节/自由形状，页面实时看到
+sketchpad lint            # 几何自查：重叠/压线/出框，返回可修的 id 清单
 sketchpad snapshot        # 渲染 PNG 给 agent 自查
 sketchpad undo            # 画错了撤销重来
 ```

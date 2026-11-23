@@ -10,6 +10,8 @@ import { COLOR_LABEL, DRAW_TOOLS, SKETCH_COLORS, SKETCH_SIZES, SKETCH_TOOLS, STE
 import { renderDocSvg, resolveFontFile, FONT_FAMILY, TOOL_STYLE } from "./render.js";
 import { projectRoot } from "./paths.js";
 import { sketchpadApi, sketchpadUrl, ensureSketchpadRoute } from "./route.js";
+import { composeShapes } from "./compose.js";
+import { lintDoc } from "./lint.js";
 
 /** 快照渲染只需要文档形状（与 backend 的 CanvasDoc 同形），避免拉入完整文档模块 */
 type CanvasDocShape = { rev: number; width: number; height: number; strokes: SketchStroke[]; texts: SketchText[]; icons?: { id: string; name: string; x: number; y: number; size: number; color: SketchColor }[] };
@@ -314,6 +316,93 @@ export function sketchpadToolDefs(): ToolDef[] {
           );
         } catch (e) {
           return textResult(`绘制失败：${(e as Error).message}`, true);
+        }
+      },
+    },
+
+    {
+      name: "sketchpad_compose",
+      title: "场景构图",
+      description:
+        "场景级确定性构图：给结构化场景描述（而不是手排坐标），一次调用画出对齐、间距、连线起止都正确的结构骨架。" +
+        "产出的形状带 group/order 语义（默认组名按场景、order=3 主内容），叙事回放按层级编排。画完用 sketchpad_snapshot 自查。\n" +
+        "scene=flow 流程图：nodes [{id,label,kind?,icon?}]+edges [{from,to,label?,dashed?}]，dir=tb(默认)/lr。" +
+        "kind: start/end=椭圆（首尾） process=圆角矩形（默认） decision=菱形（分支判断）；icon 为 looseleaf 名画在文字上方。\n" +
+        "scene=sequence 时序图：participants [{id,label}]+messages [{from,to,label?,kind?:solid|dashed}]（按发生顺序；from===to 画自调用回环）。\n" +
+        "scene=wireframe 原型骨架：frame=phone/browser + regions [{x,y,w,h,label?}]（相对 frame 内容区 0~1 归一化矩形）。\n" +
+        "适合先 compose 打底、再用 draw 叠手绘细节（涂改痕迹、装饰、组标注）；自由构图仍用 draw。",
+      inputSchema: {
+        canvas: makeCanvasInput(),
+        scene: z.enum(["flow", "sequence", "wireframe"]).describe("场景类型"),
+        group: z.string().min(1).max(40).optional().describe("语义分组名（缺省：流程图/时序图/原型）"),
+        order: z.number().int().min(1).max(999).optional().describe("叙事层级（缺省 3=主内容）"),
+        nodes: z.array(z.object({ id: z.string().min(1).max(30), label: z.string().min(1).max(24), kind: z.enum(["start", "end", "process", "decision"]).optional(), icon: z.string().max(40).optional() })).max(24).optional().describe("flow：节点列表"),
+        edges: z.array(z.object({ from: z.string().min(1).max(30), to: z.string().min(1).max(30), label: z.string().max(12).optional(), dashed: z.boolean().optional() })).max(40).optional().describe("flow：连线列表"),
+        dir: z.enum(["tb", "lr"]).optional().describe("flow：布局方向 tb 自上而下（默认）/ lr 自左而右"),
+        participants: z.array(z.object({ id: z.string().min(1).max(30), label: z.string().min(1).max(16) })).max(10).optional().describe("sequence：参与者（从左到右）"),
+        messages: z.array(z.object({ from: z.string().min(1).max(30), to: z.string().min(1).max(30), label: z.string().max(16).optional(), kind: z.enum(["solid", "dashed"]).optional() })).max(16).optional().describe("sequence：消息（按发生顺序）"),
+        frame: z.enum(["phone", "browser"]).optional().describe("wireframe：设备框类型"),
+        regions: z.array(z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number(), label: z.string().max(12).optional() })).max(16).optional().describe("wireframe：内容区（0~1 归一化矩形 + 左上标签）"),
+        title: z.string().max(24).optional().describe("图标题（画在顶部）"),
+      },
+      handler: async (args) => {
+        try {
+          const scene = args.scene as "flow" | "sequence" | "wireframe";
+          const defaultGroup = { flow: "流程图", sequence: "时序图", wireframe: "原型" }[scene];
+          const shapes = composeShapes({
+            scene,
+            nodes: args.nodes,
+            edges: args.edges,
+            dir: args.dir,
+            participants: args.participants,
+            messages: args.messages,
+            frame: args.frame,
+            regions: args.regions,
+            title: args.title,
+          } as never);
+          if (!shapes.length) return textResult("没有可绘制的内容（输入为空）", true);
+          const r = await sketchpadApi<{ id: string; rev: number; added: number; texts: number; icons: number; strokes: number; clamped: number; strokeIds: string[]; textIds: string[]; iconIds: string[] }>(
+            canvasPath(args.canvas, "draw"),
+            { method: "POST", body: JSON.stringify({ shapes, group: args.group ?? defaultGroup, order: args.order ?? 3 }) },
+          );
+          const warn = r.clamped > 0 ? `（${r.clamped} 个点越界已钳回）` : "";
+          return textResult(
+            `画布 ${r.id} 已按「${scene}」场景构图落笔：${r.added} 个元素（${r.strokes} 笔迹 + ${r.texts} 标注 + ${r.icons} icon）${warn}，` +
+              `归入分组「${args.group ?? defaultGroup}」order=${args.order ?? 3}。` +
+              `用 sketchpad_snapshot 自查；要加手绘细节（涂改痕迹/装饰/更细标注）在骨架坐标上继续 draw，勿覆盖此组。`,
+          );
+        } catch (e) {
+          return textResult(`构图失败：${(e as Error).message}`, true);
+        }
+      },
+    },
+
+    {
+      name: "sketchpad_lint",
+      title: "几何自查",
+      description:
+        "画布几何检查，把「画得不好」的可计算信号变成清单：文本互相重叠、文本被笔迹划过（压在框线/箭头上）、文本/icon 超出首页画框、笔迹大幅出框。" +
+        "返回问题列表与元素 id——用 sketchpad_erase 删掉重画即可修。画完一批结构后、snapshot 目测前先 lint 一次，构成完整自查回路。",
+      inputSchema: {
+        canvas: makeCanvasInput(),
+      },
+      handler: async ({ canvas }) => {
+        try {
+          const { doc } = await sketchpadApi<{ doc: Parameters<typeof lintDoc>[0] }>(canvasPath(canvas, "doc"));
+          const issues = lintDoc(doc);
+          if (issues.length === 0) {
+            return textResult("lint 通过：无文本重叠、无压线、无出框。继续下一批。");
+          }
+          const lines = issues.map((i) => {
+            const tag = i.severity === "error" ? "✗" : i.severity === "warn" ? "△" : "·";
+            return `${tag} ${i.msg}${i.ids.length ? `（ids: ${i.ids.join(" ")}）` : ""}`;
+          });
+          return textResult(
+            `发现 ${issues.length} 个问题：\n${lines.join("\n")}\n` +
+              "修复：文本/笔迹问题用 sketchpad_erase 删对应 id 重画（删文本只删文本，不动框）；info 级可忽略。",
+          );
+        } catch (e) {
+          return textResult(`lint 失败：${(e as Error).message}`, true);
         }
       },
     },

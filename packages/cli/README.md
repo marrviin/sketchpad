@@ -24,8 +24,10 @@ sketchpad ui    # 打开（或拉起）画板服务并打印页面地址
 ```bash
 sketchpad state            # 画布 id、尺寸、当前画笔、已有内容
 sketchpad new              # 新建画布（返回 id 与页面 URL）
-sketchpad draw '{"shapes":[…],"unit":"norm"}'   # 一批形状/文本（norm=0~1 归一化坐标）
+sketchpad compose @scene.json   # 场景构图：flow/sequence/wireframe 结构骨架一次成图
+sketchpad draw '{"shapes":[…],"unit":"norm"}'   # 手绘细节/自由形状（norm=0~1 归一化坐标）
 sketchpad order '{"canvas":"<id>","orders":{"标注":5,"主流程":3}}'   # 修叙事层级（回放按此编排）
+sketchpad lint             # 几何自查：文本重叠/压线/出框，返回可修的 id 清单
 sketchpad snapshot         # 渲染 PNG 落盘，供 agent Read 自查
 sketchpad undo / redo / erase / clear / grid / brush / use / preview
 sketchpad tool <名> [json]  # 通用入口（工具名可省略 sketchpad_ 前缀）

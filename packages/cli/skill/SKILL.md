@@ -14,14 +14,15 @@ sketchpad = looseleaf Sketchpad 画板（统一前端 `/sketchpad` 入口）+ CL
 ```bash
 sketchpad state          # ① 拿画布 id、尺寸、当前画笔、已有内容（= tool get_state）
 sketchpad new            #    （或新建画布，返回画布 id 与页面 URL）
-sketchpad grid '{"canvas":"<id>"}'                                     # ② 铺 24×24 构造网格（画 icon 时）
-sketchpad draw @shapes.json        # ③ 一批形状/文本（长参数写文件用 @file，免 shell 引号地狱；也支持管道 stdin 与内联 JSON）
-sketchpad snapshot '{"canvas":"<id>"}'                                 # ④ 渲染 PNG 落盘
+sketchpad compose @scene.json      # ② 结构骨架（流程图/时序图/原型骨架）一次构图，见下节；自由构图则 grid+draw
+sketchpad draw '{"canvas":"<id>","shapes":[…]}'   # ③ 叠手绘细节/自由形状（长参数用 @file，免 shell 引号地狱；也支持管道 stdin）
+sketchpad lint '{"canvas":"<id>"}'                 # ④ 几何自查：文本重叠/压线/出框，返回 id 清单
+sketchpad snapshot '{"canvas":"<id>"}'             # ⑤ 渲染 PNG 落盘
 ```
 
-⑤ 用 **Read 工具查看 snapshot 返回的 PNG**——自查回路的关键一步，每批画完必须看。
-⑥ 不像/位置不对 → 小错用 `sketchpad erase '{"ids":[…]}'` 按元素 id 删（id 在 draw 返回或 `state {"ids":true}` 清单里）；整批不像才 `sketchpad undo`（`redo` 反悔）。像了 → 回到 ③。
-⑦ 画完 icon 后 `sketchpad undo` 撤掉构造网格（或保留当构图辅助）。
+⑥ 用 **Read 工具查看 snapshot 返回的 PNG**——自查回路的关键一步，每批画完必须看。
+⑦ 修：lint 清单里的文本/笔迹问题 `sketchpad erase '{"ids":[…]}'` 按 id 删重画；构图/比例不对再 snapshot 目测，小错删元素、整批不像才 `sketchpad undo`（`redo` 反悔）。像了 → 回到 ③。
+⑧ 画完 icon 后 `sketchpad undo` 撤掉构造网格（或保留当构图辅助）。
 
 > snapshot 是 looseleaf 笔刷的轻量近似（折线+圆帽+手写体文字），判断构图/形状/比例/颜色/位置足够；给用户展示最终效果用 `sketchpad preview` 的页面截图。
 
@@ -42,6 +43,25 @@ sketchpad draw '{"canvas":"<id>","group":"数据库","shapes":[新形状]}'  # �
 - **用户说"数据库那个圆柱画得不像"** → `state` 找组 → `erase {name:"数据库"}` → 重画。不用列 id、不用算坐标。
 - 同名 group 多次 draw 会**合并**进同一组；erase 按名删整组后再画同名会重建。
 - 页面手画的笔迹没有 group（agent-only 语义）；页面 PUT 回流不会冲掉 agent 的组。
+
+## 场景构图：compose 一次成骨架（流程图 / 时序图 / 原型骨架）
+
+结构化场景**不要手排坐标**——`compose` 内置确定性布局（对齐、间距、节点尺寸按文字宽度自动算、连线起止贴边、回退边自动绕行），一次调用画出正确骨架，比手排又快又准：
+
+```bash
+sketchpad compose '{"scene":"flow","title":"下单流程","nodes":[
+  {"id":"s","label":"进入","kind":"start"},{"id":"a","label":"浏览","icon":"search"},
+  {"id":"d","label":"库存够?","kind":"decision"},{"id":"e","label":"完成","kind":"end"}],
+ "edges":[{"from":"s","to":"a"},{"from":"a","to":"d"},{"from":"d","to":"e"},{"from":"d","to":"a","label":"否","dashed":true}]}'   # 流程图：start/end 椭圆、process 圆角框、decision 菱形，dir=tb/lr
+sketchpad compose '{"scene":"sequence","participants":[{"id":"u","label":"用户"},{"id":"p","label":"网关"}],
+ "messages":[{"from":"u","to":"p","label":"请求"},{"from":"p","to":"u","label":"回调","kind":"dashed"}]}'   # 时序图：生命线/消息箭头/自调用回环，消息按发生顺序给
+sketchpad compose '{"scene":"wireframe","frame":"phone","regions":[
+  {"x":0.06,"y":0.02,"w":0.88,"h":0.1,"label":"搜索栏"},{"x":0.06,"y":0.16,"w":0.88,"h":0.3,"label":"Banner"}]}'   # 原型骨架：设备框 + 内容区（0~1 归一化）
+```
+
+- compose 产出自动归组（流程图/时序图/原型，order=3）；`group`/`order` 参数可覆盖。
+- **先 compose 打底，再用 draw 叠手绘细节**（涂改痕迹、hatch 阴影、强调色、装饰）——细节画在骨架坐标上，勿整组重画。
+- 自由构图（不规则插画、icon 创作、非标准布局）仍用 `draw`；两条路线不冲突。
 
 ## 叙事层级：按产品叙事画，回放按叙事播
 
@@ -106,6 +126,7 @@ sketchpad order '{"canvas":"<id>","orders":{"标注":5,"主流程":3}}'         
 - 图标设计原则与高频配方（放大镜/齿轮/用户/爱心/铃铛/房子）见 [references/icons.md](references/icons.md)。
 
 ### 手绘架构图 / 流程图
+- **标准流程图/架构骨架先用 `compose scene:"flow"`**（节点对齐、连线贴边、菱形分支、回退边绕行都是算法保证的），再用 draw 叠细节。compose 覆盖不了的自由构图才手排，此时按下面规范：
 - 节点：`rrect` 圆角框；**抽象符号一律用 stencil**——数据库 `db`、服务器 `server`、外部系统 `cloud`、参与者 `actor`、子系统分组 `group`，别用方盒子代替圆柱/云。
 - 分层强调用 `hatch` 排线或换色（颜色=层级语义）。大框别用 `marker` 描边——快照里笔触过粗会压到相邻框线，要加粗用 `size:2.5` 的 felt。
 - 连线：有方向用 `arrow`；无方向关联用 `line`；边界/隐藏层用 `dash`。双向交互（如 SSE 推送 / PUT 回流）画两条平行斜线各配标注。
@@ -114,6 +135,7 @@ sketchpad order '{"canvas":"<id>","orders":{"标注":5,"主流程":3}}'         
 - stereotype 对照表、布局/箭头/配色约定见 [references/arch-flow.md](references/arch-flow.md)。
 
 ### 手绘风格原型图
+- **整页骨架先用 `compose scene:"wireframe"`**（设备框 + 内容区一次成型，标签自动贴左上角），复杂分区/组件再用 draw 叠加。手排时按下面规范：
 - **先设备框再铺 UI**：移动端用 `stencil kind:"phone"`，桌面/Web 用 `stencil kind:"browser"`；复杂页面（电商首页等）建议手画 macOS Chrome 三层顶栏（红绿灯/标签/工具栏，见 prototypes.md）。
 - **先列层次清单再开画**：把页面拆成层（工具条→头部→导航→首屏→楼层→页脚），每层定 y 范围，层内再套间距档位（见 prototypes.md"间距规范"），然后 px 精确排坐标。
 - 卡片/组件：`rrect`；强调/选中态：`hatch` 排线；隐藏/折叠边界：`dash`。

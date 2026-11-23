@@ -501,11 +501,12 @@ export class CanvasState {
   }
 
   private snapshot(): CanvasContent {
-    /* groups 深拷贝：append 之后的 registerGroup/序调整会原地改组对象，共享引用会让 undo 无法回滚组状态 */
+    /* strokes/texts/icons/groups 深拷贝：append/addIcons 之后的原地 push 会共享引用，
+       undo/redo 恢复的会是「当前态」而非历史态（groups 同因已深拷贝，icon 数组同理） */
     return {
       strokes: this.doc.strokes,
       texts: this.doc.texts,
-      icons: this.doc.icons,
+      icons: [...this.doc.icons],
       groups: this.doc.groups.map((g) => ({ ...g, strokeIds: [...g.strokeIds], textIds: [...g.textIds], iconIds: g.iconIds ? [...g.iconIds] : undefined })),
     };
   }

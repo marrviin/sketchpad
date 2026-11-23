@@ -10,7 +10,7 @@ import { projectRoot } from "./paths.js";
  * sketchpad CLI：
  *   sketchpad tool <名称> [json]
  *                            调用画板工具（工具名可省略 sketchpad_ 前缀，如 state / draw / undo）
- *   sketchpad state|new|brush|draw|grid|snapshot|undo|redo|erase|order|use|clear|preview [json]
+ *   sketchpad state|new|brush|draw|compose|grid|snapshot|undo|redo|erase|order|use|clear|preview|lint [json]
  *                            高频工具的具名入口（等价 tool <名称> [json]）。
  *                            参数 JSON 支持内联 / @文件路径（如 sketchpad draw @shapes.json）/ "-" 或管道 stdin
  *   sketchpad ui             确保画板服务在线并打印页面地址（daemon 或本地常驻，自动选择）
@@ -29,6 +29,7 @@ const NAMED_TOOLS = [
   ["new", "new_canvas"],
   ["brush", "set_brush"],
   ["draw", "draw"],
+  ["compose", "compose"],
   ["grid", "grid"],
   ["snapshot", "snapshot"],
   ["undo", "undo"],
@@ -38,6 +39,7 @@ const NAMED_TOOLS = [
   ["use", "use"],
   ["clear", "clear"],
   ["preview", "preview"],
+  ["lint", "lint"],
 ] as const;
 
 /** 读 stdin 全文（参数走管道时用） */
