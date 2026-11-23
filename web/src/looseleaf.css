@@ -364,6 +364,14 @@
     stroke-dashoffset: 0;
   }
 }
+@keyframes ll-reveal {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
 @keyframes ll-wipe {
   from {
     clip-path: inset(-10% var(--ll-wipe-r, 100%) -10% var(--ll-wipe-l, -4%));

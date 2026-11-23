@@ -178,11 +178,11 @@ export function sketchpadToolDefs(): ToolDef[] {
               lines.push(`  ${ic.id} → icon "${ic.name}" @${ic.x},${ic.y} size=${ic.size}`);
             for (const s of doc.strokes as SketchStroke[])
               lines.push(`  ${s.id} → ${s.tool}/${s.color} ×${s.pts.length}点 @${Math.round(s.pts[0]?.[0] ?? 0)},${Math.round(s.pts[0]?.[1] ?? 0)}`);
-            const groups = (doc.groups ?? []) as { name: string; strokeIds: string[]; textIds: string[]; iconIds?: string[] }[];
+            const groups = (doc.groups ?? []) as { name: string; strokeIds: string[]; textIds: string[]; iconIds?: string[]; order?: number }[];
             if (groups.length) {
-              lines.push("", "语义分组（按名擦/按名改：sketchpad erase {name}）：");
+              lines.push("", "语义分组（按名擦/按名改：sketchpad erase {name}；阶段 = 叙事层级，回放按它排序）：");
               for (const g of groups)
-                lines.push(`  「${g.name}」${g.strokeIds.length} 笔迹 + ${g.textIds.length} 文本${g.iconIds?.length ? ` + ${g.iconIds.length} icon` : ""}`);
+                lines.push(`  「${g.name}」${g.strokeIds.length} 笔迹 + ${g.textIds.length} 文本${g.iconIds?.length ? ` + ${g.iconIds.length} icon` : ""} → 阶段 ${g.order ?? "—"}`);
             }
           }
           lines.push("", "并发作画请先 sketchpad_new_canvas 各自建画布，之后所有工具带上 canvas id。");
@@ -273,9 +273,10 @@ export function sketchpadToolDefs(): ToolDef[] {
         color: z.enum(SKETCH_COLORS).optional().describe("本批形状的默认颜色"),
         size: makeSizeInput().optional().describe("本批形状的默认粗细"),
         group: z.string().min(1).max(40).optional().describe("语义分组名：这批形状归入该组，以后可用 erase {name} 整组擦掉重画。如 \"数据库\" \"登录按钮\" \"主标题\""),
+        order: z.number().int().min(1).max(999).optional().describe("叙事层级（需与 group 同时给）：1=画布/设备框 2=骨架分区 3=主内容/用户动线 4=次级内容 5=标注。实际绘制顺序也应按层级推进，回放按此排序"),
         canvas: makeCanvasInput(),
       },
-      handler: async ({ shapes, unit, tool, color, size, group, canvas }) => {
+      handler: async ({ shapes, unit, tool, color, size, group, order, canvas }) => {
         try {
           // 调用层点为 {x,y} 对象（网关兼容），backend 契约是 [x,y] tuple——这里转回
           const backendShapes = shapes.map((s: ShapeInput) => {
@@ -297,7 +298,7 @@ export function sketchpadToolDefs(): ToolDef[] {
           });
           const r = await sketchpadApi<{ id: string; rev: number; added: number; texts: number; icons: number; strokes: number; clamped: number; strokeIds: string[]; textIds: string[]; iconIds: string[] }>(canvasPath(canvas, "draw"), {
             method: "POST",
-            body: JSON.stringify({ shapes: backendShapes, unit, tool, color, size, group }),
+            body: JSON.stringify({ shapes: backendShapes, unit, tool, color, size, group, order }),
           });
           const warn = r.clamped > 0 ? `（${r.clamped} 个点越界已钳回画布边缘）` : "";
           const tinfo = r.texts ? `，其中 ${r.texts} 条文本` : "";
@@ -489,6 +490,38 @@ export function sketchpadToolDefs(): ToolDef[] {
           );
         } catch (e) {
           return textResult(`删除失败：${(e as Error).message}`, true);
+        }
+      },
+    },
+
+    {
+      name: "sketchpad_order",
+      title: "调整叙事层级",
+      description:
+        "事后调整各语义分组的叙事层级（回放/演示按它排序）：orders 为 {组名: 层级}。" +
+        "规范层级 1=画布/设备框 2=骨架分区 3=主内容/用户动线 4=次级内容 5=标注。" +
+        "用于画完发现顺序不对时修序（比如标注画在了中间）；改动可撤销，未知组名会列在 unknown 里不报错。",
+      inputSchema: {
+        canvas: makeCanvasInput(),
+        orders: z
+          .record(z.string().min(1).max(40), z.number().int().min(1).max(999))
+          .describe("组名 → 叙事层级（1~999）：{\"背景\":1,\"主流程\":3,\"标注\":5}；组名用 get_state ids=true 的分组清单"),
+      },
+      handler: async ({ canvas, orders }) => {
+        try {
+          const r = await sketchpadApi<{ id: string; rev: number; updated: number; unknown: string[]; groups: { name: string; order: number | null }[] }>(
+            canvasPath(canvas, "order"),
+            { method: "POST", body: JSON.stringify({ orders }) },
+          );
+          const seq = r.groups
+            .filter((g) => g.order !== null)
+            .sort((a, b) => (a.order as number) - (b.order as number))
+            .map((g) => `${g.order}:${g.name}`)
+            .join(" → ");
+          const unknownNote = r.unknown.length ? `；未知组名（未改动）：${r.unknown.join("、")}` : "";
+          return textResult(`画布 ${r.id} 已更新 ${r.updated} 个分组层级（rev ${r.rev}）${unknownNote}。当前叙事序：${seq || "（尚无带层级的分组）"}。`);
+        } catch (e) {
+          return textResult(`调整层级失败：${(e as Error).message}`, true);
         }
       },
     },

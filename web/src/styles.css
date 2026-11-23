@@ -46,3 +46,10 @@ body {
 [data-slot="sketchpad"][data-canvas-revealed="pending"] [data-slot="sketchpad-surface"] {
   opacity: 0.01;
 }
+
+/* autoFit 取景门（见 sketchpad.tsx fitDone 注释）：fit 前内容层藏住（同样 0.01 保栅格），
+   取景就绪同帧原子显现——避免先按默认原点渲染一瞬再跳到居中 */
+[data-slot="sketchpad-canvas"][data-fit-pending] [data-slot="sketchpad-surface"],
+[data-slot="sketchpad-canvas"][data-fit-pending] [data-slot="sketchpad-surface-replay"] {
+  opacity: 0.01;
+}

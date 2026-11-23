@@ -36,6 +36,7 @@ import {
   type StrokeMarkup,
 } from "@content-forge/ink/recipes/sketchpad-ink"
 import { svgToPngDataUrl } from "@/lib/sketch-export"
+import { replayRevealOrder, GROUP_GAP, type ReplayGroupLite } from "@/lib/replay-order"
 import { cn } from "@/lib/utils"
 
 type StrokeInput = Omit<SketchStroke, "id"> & { id?: string }
@@ -140,6 +141,8 @@ interface SketchpadContextValue {
   strokes: SketchStroke[]
   texts: readonly SketchText[]
   icons: readonly SketchDocIcon[]
+  /** 语义分组（agent 叙事层级）：回放按 replayStrokeOrder 编排；空 = 文档顺序 */
+  groups: readonly ReplayGroupLite[]
   width: number
   height: number
   view: SketchpadView
@@ -192,6 +195,8 @@ type SketchpadProps = Omit<React.ComponentProps<"div">, "onChange" | "defaultVal
   texts?: readonly SketchText[]
   /** 1:1 looseleaf icon 元素（agent-only；页面随文档渲染） */
   icons?: readonly SketchDocIcon[]
+  /** 语义分组（镜像 contract.ts ElementGroup）：回放按叙事层级 order 编排，空/无 order 时退回文档顺序 */
+  groups?: readonly ReplayGroupLite[]
   tool?: SketchTool
   defaultTool?: SketchTool
   onToolChange?: (tool: SketchTool) => void
@@ -226,6 +231,7 @@ function Sketchpad({
   onValueChange,
   texts = [],
   icons = [],
+  groups = [],
   tool: toolProp,
   defaultTool = "felt",
   onToolChange,
@@ -413,6 +419,7 @@ function Sketchpad({
     strokes,
     texts,
     icons,
+    groups,
     width,
     height,
     view,
@@ -493,11 +500,18 @@ function docIconRender(name: string) {
   return out
 }
 
-function DocIconsLayer({ icons }: { icons: readonly SketchDocIcon[] }) {
+/** 回放中文本/icon 的淡入样式（delay 未定义 = 即时显现，不带动画） */
+function revealStyle(delay: number | undefined): React.CSSProperties | undefined {
+  return delay === undefined
+    ? undefined
+    : { opacity: 0, animation: "ll-reveal 0.18s ease-out forwards", animationDelay: `${delay}s` }
+}
+
+function DocIconsLayer({ icons, reveal, onDone }: { icons: readonly SketchDocIcon[]; reveal?: readonly (number | undefined)[]; onDone?: (id: string) => void }) {
   useEnsureInkDefs()
   return (
     <g data-slot="sketchpad-icons">
-      {icons.map((ic) => {
+      {icons.map((ic, i) => {
         const m = docIconRender(ic.name)
         if (!m) return null
         const [b0, b1, b2, b3] = m.bbox
@@ -510,7 +524,8 @@ function DocIconsLayer({ icons }: { icons: readonly SketchDocIcon[] }) {
             key={ic.id}
             data-icon={ic.name}
             transform={`translate(${tx.toFixed(1)} ${ty.toFixed(1)}) scale(${(ic.size / 64).toFixed(4)})`}
-            style={{ color: `var(--ll-${ic.color})` }}
+            style={{ color: `var(--ll-${ic.color})`, ...revealStyle(reveal?.[i]) }}
+            onAnimationEnd={onDone ? () => onDone(ic.id) : undefined}
             dangerouslySetInnerHTML={{ __html: m.svg }}
           />
         )
@@ -752,7 +767,7 @@ function stripDrawMasks(svg: string): string {
   return svg.replace(DRAW_MASK_DEF_RE, "").replace(DRAW_MASK_REF_RE, "")
 }
 
-const StrokeShape = React.memo(function StrokeShape({ stroke, m, dim, replay, maskId }: { stroke: SketchStroke; m: StrokeMarkup; dim: boolean; replay: ReplayTiming | null; maskId: string }) {
+const StrokeShape = React.memo(function StrokeShape({ stroke, m, dim, replay, onDone, maskId }: { stroke: SketchStroke; m: StrokeMarkup; dim: boolean; replay: ReplayTiming | null; onDone?: (id: string) => void; maskId: string }) {
   const style = dim ? { opacity: 0.22 } : undefined
   if (!replay) return <g data-stroke={stroke.id} style={style} dangerouslySetInnerHTML={{ __html: m.svg }} />
   // mask 按笔迹自身 bbox 定界（无界画布下不能再用固定 W×H 大 mask——userSpaceOnUse mask 是光栅化的）
@@ -771,6 +786,7 @@ const StrokeShape = React.memo(function StrokeShape({ stroke, m, dim, replay, ma
           strokeLinecap="round"
           strokeLinejoin="round"
           className="ll-draw"
+          onAnimationEnd={() => onDone?.(stroke.id)}
           style={{ "--ll-draw-delay": `${replay.delay.toFixed(2)}s`, animationDuration: `${replay.dur.toFixed(2)}s`, animationTimingFunction: "linear" } as React.CSSProperties}
         />
       </mask>
@@ -833,6 +849,8 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
   const help = React.useId()
   const uid = ctx.seed.replace(/[^a-zA-Z0-9]/g, "")
   const surface = React.useRef<SVGSVGElement | null>(null)
+  /** 回放 overlay 层：正在动画的笔迹/文本/icon 单独一层，静态层零失效不闪瓦片 */
+  const surfaceReplay = React.useRef<SVGSVGElement | null>(null)
   const gesture = React.useRef<Gesture | null>(null)
   const penSeen = React.useRef(Number.NEGATIVE_INFINITY)
   const frame = React.useRef(0)
@@ -875,6 +893,10 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
   // wheel/pan 处理器里同步读视口，绕开 effect 闭包
   const viewRef = React.useRef(view)
   viewRef.current = view
+  /** 用户手势（滚轮/拖拽）接管过视口：置位后 autoFit 不再自动取景，切画布复位 */
+  const userTouched = React.useRef(false)
+  /** 本轮 autoFit 已完成过内容取景（防止 effect 自触发循环；切画布回默认视口时复位） */
+  const fittedFor = React.useRef(false)
   const [pane, setPane] = React.useState<[number, number]>([W, H])
   const paneRef = React.useRef<[number, number]>(pane)
   paneRef.current = pane
@@ -917,22 +939,74 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
   /** 手势期直写 DOM transform（与 workflow 的 d3 同款）：wheel 平移/缩放与拖拽 pan 的
    *  每帧更新不再走 React setState——否则每帧触发整树 reconciliation + localStorage，
    *  就是"缩放流畅、移动还卡"的根源。同步更新 viewRef 保证 project() 画线坐标准确；
-   *  手势结束时由调用方 setView(一次) 同步 React state 与持久化 */
+   *  手势结束时由调用方 setView(一次) 同步 React state 与状态同步 */
   const applyViewDom = React.useCallback((v: SketchpadView) => {
+    userTouched.current = true
     viewRef.current = v
     const z = v.zoom || 1
     const c = committedRef.current
     const k = z / (c.zw || 1)
     const t = `translate(${v.x + c.vx * z}px, ${v.y + c.vy * z}px) scale(${k})`
     if (surface.current) surface.current.style.transform = t
+    if (surfaceReplay.current) surfaceReplay.current.style.transform = t
     if (worldRef.current) worldRef.current.style.transform = t
   }, [])
+
+  // 回放编排：strokes 与 strokes 数组同下标对齐（StrokeShape 按 replay.strokes[i] 取）；
+  // texts/icons 各自同下标放揭示时刻（秒）——文本/icon 不做逐笔动画，到点淡入。
+  // 有语义分组时按叙事层级逐组播放（组内笔迹→文本→icon，组间 GROUP_GAP 停顿），
+  // 无组退回文档顺序、文本/icon 即时显现（原行为）。
+  // 必须先于 strokeInfos（strokeTier 的回放锁定要读 timing）
+  const timing = React.useMemo<
+    { strokes: ReplayTiming[]; texts: (number | undefined)[]; icons: (number | undefined)[] } | null
+  >(() => {
+    if (!ctx.replaying) return null
+    const out: ReplayTiming[] = new Array(ctx.strokes.length)
+    const textAt: (number | undefined)[] = new Array(ctx.texts.length)
+    const iconAt: (number | undefined)[] = new Array(ctx.icons.length)
+    let t = 0.2
+    let prevKey: number | undefined
+    const seq =
+      ctx.groups.length
+        ? replayRevealOrder(ctx.strokes, ctx.texts, ctx.icons, ctx.groups)
+        : ctx.strokes.map((_, i) => ({ kind: "stroke" as const, index: i, orderKey: Infinity }))
+    for (const item of seq) {
+      if (prevKey !== undefined && item.orderKey !== prevKey) t += GROUP_GAP
+      if (item.kind === "stroke") {
+        const s = ctx.strokes[item.index]
+        const dur = Math.min(2.4, Math.max(0.14, strokeMarkup(s, { tier }).length / (420 * ctx.replaySpeed)))
+        out[item.index] = { delay: t, dur }
+        t += dur + 0.08
+      } else if (item.kind === "text") {
+        textAt[item.index] = t
+      } else {
+        iconAt[item.index] = t
+      }
+      prevKey = item.orderKey
+    }
+    return { strokes: out, texts: textAt, icons: iconAt }
+  }, [ctx.replaying, ctx.strokes, ctx.texts, ctx.icons, ctx.replaySpeed, ctx.groups, tier])
+
+  // 已播完的元素（animationend 后摘 mask/动画转静态渲染）：mask 是光栅化纹理，128 笔全挂着
+  // 会让后期每帧动画失效都触发大面积重栅格化（瓦片来不及上屏 = 内容闪失又出现）。
+  // 键前缀区分类型：s=笔迹 t=文本 i=icon
+  const [played, setPlayed] = React.useState<ReadonlySet<string>>(NO_IDS)
+  React.useEffect(() => {
+    setPlayed(NO_IDS)
+  }, [ctx.replayKey])
+  const markPlayed = React.useCallback((key: string) => {
+    setPlayed((prev) => (prev.has(key) ? prev : new Set(prev).add(key)))
+  }, [])
+  const onStrokeDone = React.useCallback((id: string) => markPlayed(`s${id}`), [markPlayed])
+  const onTextDone = React.useCallback((id: string) => markPlayed(`t${id}`), [markPlayed])
+  const onIconDone = React.useCallback((id: string) => markPlayed(`i${id}`), [markPlayed])
 
   // markup（含 bbox）提升到父级算好下发：视口裁剪和内容自适应都要用 bbox，
   // StrokeShape 也不再重复计算；svg 剥掉内嵌 draw mask（见 stripDrawMasks 注释）
   // LOD：缩小视图（z<0.9）时笔迹降级为 lo 档 markup（点数约减半，栅格提速）——
-  // 缩小视图下整幅画布可见、笔迹很小，降级视觉无感；跨过阈值时按档位重算 markup
-  const strokeTier = view.zoom < 0.9 ? "lo" : tier
+  // 缩小视图下整幅画布可见、笔迹很小，降级视觉无感；跨过阈值时按档位重算 markup。
+  // 回放中锁定当前档位：中途缩放跨阈值会整层重算 markup，静态层全体重栅格化（闪）
+  const strokeTier = !timing && view.zoom < 0.9 ? "lo" : tier
   const strokeInfos = React.useMemo(
     () =>
       ctx.strokes.map((s) => {
@@ -960,14 +1034,18 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
     return [bx0, by0, bx1, by1]
   }, [strokeInfos, ctx.texts, ctx.icons])
 
-  /** 取景内容包围盒（留 80px 边距），缩放上限内尽量铺满面板 */
-  const fitContent = React.useCallback((pw: number, ph: number) => {
-    const [bx0, by0, bx1, by1] = contentBbox
-    const bw = Math.max(1, bx1 - bx0)
-    const bh = Math.max(1, by1 - by0)
-    const z = clampZoom(Math.min((pw - 80) / bw, (ph - 80) / bh, ZOOM_MAX))
-    setView({ x: (pw - bw * z) / 2 - bx0 * z, y: (ph - bh * z) / 2 - by0 * z, zoom: z })
-  }, [contentBbox])
+  /** fit 目标（纯计算）：内容包围盒居中铺满面板（留 80px 边距） */
+  const fitTarget = React.useCallback(
+    (pw: number, ph: number): SketchpadView => {
+      const [bx0, by0, bx1, by1] = contentBbox
+      const bw = Math.max(1, bx1 - bx0)
+      const bh = Math.max(1, by1 - by0)
+      const z = clampZoom(Math.min((pw - 80) / bw, (ph - 80) / bh, ZOOM_MAX))
+      return { x: (pw - bw * z) / 2 - bx0 * z, y: (ph - bh * z) / 2 - by0 * z, zoom: z }
+    },
+    [contentBbox],
+  )
+  const fitContent = React.useCallback((pw: number, ph: number) => setView(fitTarget(pw, ph)), [fitTarget, setView])
   const fitContentRef = React.useRef(fitContent)
   fitContentRef.current = fitContent
 
@@ -978,6 +1056,9 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
     [],
   )
 
+  // pane 首次实测（ResizeObserver 首轮回调）前 pane 初值是文档尺寸，不能拿去 fit——
+  // 否则首屏 fit 用错面板尺寸，后续又被"已适配"挡住修不回来（刷新偏左上的根源）
+  const [paneReady, setPaneReady] = React.useState(false)
   React.useEffect(() => {
     const el = ctx.canvasRef.current
     if (!el || typeof ResizeObserver === "undefined") return
@@ -985,21 +1066,37 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
       const r = el.getBoundingClientRect()
       if (!r.width || !r.height) return
       setPane([r.width, r.height])
+      setPaneReady(true)
     })
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
 
-  // 自动适配内容包围盒：autoFit 且视口仍是默认原点时随内容变化重新取景——
-  // 文档晚于首帧到达（先适配了空首页框）也能在内容到位后正确框住全部内容
+  // 自动适配内容取景（fit+center）：面板实测就绪后适配一次；
+  // 切画布回默认视口时重置适配标记重新取景；用户一旦手势平移/缩放即停止接管。
+  // 视图等于 fit 目标时跳过（收敛，避免 effect 自触发循环）。
+  // fitDone：fit 前内容层藏住（0.01 透明度让合成器先栅格化），fit 同帧原子显现——
+  // 否则会先按默认原点渲染一瞬再跳到居中
+  const [fitDone, setFitDone] = React.useState(false)
   React.useEffect(() => {
-    if (!autoFit) return
-    const v = viewRef.current
-    if (v.x !== 0 || v.y !== 0 || v.zoom !== 1) return
+    if (!autoFit || !paneReady) return
     const [pw, ph] = paneRef.current
     if (!pw || !ph) return
-    fitContent(pw, ph)
-  }, [autoFit, fitContent])
+    const v = viewRef.current
+    if (v.x === 0 && v.y === 0 && v.zoom === 1) {
+      userTouched.current = false
+      fittedFor.current = false
+    }
+    if (userTouched.current) {
+      setFitDone(true)
+      return
+    }
+    if (fittedFor.current) return
+    const target = fitTarget(pw, ph)
+    fittedFor.current = true
+    setView(target)
+    setFitDone(true)
+  }, [autoFit, paneReady, fitTarget, pane, view, setView])
 
   // 视口操作：面板中心锚定缩放 / 回到内容取景（挂到 ctx 供 apiRef 转发）
   React.useEffect(() => {
@@ -1034,7 +1131,7 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
     let gestureZoom: number | null = null
     let idleTimer = 0
     const settle = () => {
-      // 手势结束：把 DOM 直写的最终视口同步回 React state（触发一次渲染）+ 持久化
+      // 手势结束：把 DOM 直写的最终视口同步回 React state（触发一次渲染）
       const v = viewRef.current
       if (v.x !== view.x || v.y !== view.y || v.zoom !== view.zoom) setView(v)
     }
@@ -1221,7 +1318,7 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
     if (e.pointerType === "pen") penSeen.current = e.timeStamp
     if (pan.current && pan.current.pointerId === e.pointerId) {
       pan.current = null
-      // pan 手势结束：DOM 直写的最终视口同步回 React state（一次渲染）+ 持久化
+      // pan 手势结束：DOM 直写的最终视口同步回 React state（一次渲染）
       const v = viewRef.current
       setView(v)
       const host = e.currentTarget.closest("[data-slot='sketchpad-canvas']")
@@ -1327,16 +1424,6 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
     if (!e.currentTarget.contains(e.relatedTarget)) setCursor(null)
   }
 
-  const timing = React.useMemo<ReplayTiming[] | null>(() => {
-    if (!ctx.replaying) return null
-    let t = 0.2
-    return ctx.strokes.map((s) => {
-      const dur = Math.min(2.4, Math.max(0.14, strokeMarkup(s, { tier }).length / (420 * ctx.replaySpeed)))
-      const r = { delay: t, dur }
-      t += dur + 0.08
-      return r
-    })
-  }, [ctx.replaying, ctx.strokes, ctx.replaySpeed, tier])
   const liveMarkup = React.useMemo(() => (live ? stripDrawMasks(strokeMarkup(live, { tier, live: true }).svg) : ""), [live, tier])
   const cursorSvg = React.useMemo(() => cursorMarkup(uid), [uid])
 
@@ -1365,6 +1452,7 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
     <div
       data-slot="sketchpad-canvas"
       data-panmode={panMode ? "" : undefined}
+      data-fit-pending={autoFit && !fitDone ? "" : undefined}
       data-tool={interactive ? ctx.tool : undefined}
       data-drawing={live ? "" : undefined}
       ref={useMergedRef<HTMLDivElement>(hostRef, ref, ctx.canvasRef)}
@@ -1397,7 +1485,10 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
         {children}
       </div>
       {/* 内容缩放比由 viewBox 承担且慢提交（见上方"视口层几何"注释）：布局恒等于面板，
-          元素框恒覆盖视口、栅格面积恒定；交互期由元素 transform 精确补偿 */}
+          元素框恒覆盖视口、栅格面积恒定；交互期由元素 transform 精确补偿。
+          回放拆两层：静态层（已播完，零失效——瓦片常驻不闪）+ replay overlay 层
+          （正在动画的少数元素，每帧只重栅格化这一小层）；overlay 在静态层之上，
+          笔迹本就画在文本/icon 之上，层次一致 */}
       <svg
         ref={surface}
         data-slot="sketchpad-surface"
@@ -1407,35 +1498,116 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
         viewBox={`${committed.vx} ${committed.vy} ${pane[0] / (committed.zw || 1)} ${pane[1] / (committed.zw || 1)}`}
         style={{ width: pane[0], height: pane[1], transform: `translate(${view.x + committed.vx * z}px, ${view.y + committed.vy * z}px) scale(${z / (committed.zw || 1)})`, transformOrigin: "0 0" }}
       >
-        {ctx.texts.length > 0 && (
-          <g data-slot="sketchpad-texts">
-            {ctx.texts.map((t) =>
-              timing || textVisible(viewRect, t) ? (
+        {timing ? (
+          <>
+            <g data-slot="sketchpad-texts">
+              {ctx.texts.map((t) =>
+                played.has(`t${t.id}`) ? (
+                  <text
+                    key={t.id}
+                    data-text={t.id}
+                    x={t.x}
+                    y={t.y + t.size * TEXT_BASELINE_K}
+                    fill={`var(--ll-${t.color})`}
+                    style={{ fontFamily: TEXT_FONT, fontSize: t.size }}
+                  >
+                    {t.text}
+                  </text>
+                ) : null,
+              )}
+            </g>
+            <DocIconsLayer icons={ctx.icons.filter((ic) => played.has(`i${ic.id}`))} />
+            <g data-slot="sketchpad-strokes">
+              {strokeInfos.map(({ s, m }, i) =>
+                played.has(`s${s.id}`) ? (
+                  <StrokeShape key={s.id} stroke={s} m={m} dim={erasing.has(s.id)} replay={null} maskId={`ll-replay-${uid}-${i}`} />
+                ) : null,
+              )}
+            </g>
+          </>
+        ) : (
+          <>
+            {ctx.texts.length > 0 && (
+              <g data-slot="sketchpad-texts">
+                {ctx.texts.map((t) =>
+                  textVisible(viewRect, t) ? (
+                    <text
+                      key={t.id}
+                      data-text={t.id}
+                      x={t.x}
+                      y={t.y + t.size * TEXT_BASELINE_K}
+                      fill={`var(--ll-${t.color})`}
+                      style={{ fontFamily: TEXT_FONT, fontSize: t.size }}
+                    >
+                      {t.text}
+                    </text>
+                  ) : null,
+                )}
+              </g>
+            )}
+            {ctx.icons.length > 0 && <DocIconsLayer icons={ctx.icons} />}
+            <g data-slot="sketchpad-strokes">
+              {strokeInfos.map(({ s, m }) =>
+                bboxVisible(viewRect, m.bbox) ? (
+                  <StrokeShape key={s.id} stroke={s} m={m} dim={erasing.has(s.id)} replay={null} maskId={`ll-replay-${uid}`} />
+                ) : null,
+              )}
+            </g>
+          </>
+        )}
+        {live ? <g data-slot="sketchpad-live" dangerouslySetInnerHTML={{ __html: liveMarkup }} /> : null}
+        {cursor ? <g data-slot="sketchpad-cursor" transform={`translate(${cursor[0]} ${cursor[1]})`} dangerouslySetInnerHTML={{ __html: cursorSvg }} /> : null}
+      </svg>
+      {timing && (
+        <svg
+          ref={surfaceReplay}
+          data-slot="sketchpad-surface-replay"
+          aria-hidden="true"
+          focusable="false"
+          className="pointer-events-none absolute left-0 top-0 forced-color-adjust-none"
+          viewBox={`${committed.vx} ${committed.vy} ${pane[0] / (committed.zw || 1)} ${pane[1] / (committed.zw || 1)}`}
+          style={{ width: pane[0], height: pane[1], transform: `translate(${view.x + committed.vx * z}px, ${view.y + committed.vy * z}px) scale(${z / (committed.zw || 1)})`, transformOrigin: "0 0", willChange: "transform" }}
+        >
+          <g data-slot="sketchpad-texts" key={`texts-${ctx.replayKey}`}>
+            {ctx.texts.map((t, i) =>
+              played.has(`t${t.id}`) ? null : (
                 <text
                   key={t.id}
                   data-text={t.id}
                   x={t.x}
                   y={t.y + t.size * TEXT_BASELINE_K}
                   fill={`var(--ll-${t.color})`}
-                  style={{ fontFamily: TEXT_FONT, fontSize: t.size }}
+                  style={{ fontFamily: TEXT_FONT, fontSize: t.size, ...revealStyle(timing.texts[i]) }}
+                  onAnimationEnd={() => onTextDone(t.id)}
                 >
                   {t.text}
                 </text>
-              ) : null,
+              ),
             )}
           </g>
-        )}
-        {ctx.icons.length > 0 && <DocIconsLayer icons={ctx.icons} />}
-        <g data-slot="sketchpad-strokes" key={ctx.replayKey}>
-          {strokeInfos.map(({ s, m }, i) =>
-            timing || bboxVisible(viewRect, m.bbox) ? (
-              <StrokeShape key={s.id} stroke={s} m={m} dim={erasing.has(s.id)} replay={timing?.[i] ?? null} maskId={`ll-replay-${uid}-${i}`} />
-            ) : null,
-          )}
-        </g>
-        {live ? <g data-slot="sketchpad-live" dangerouslySetInnerHTML={{ __html: liveMarkup }} /> : null}
-        {cursor ? <g data-slot="sketchpad-cursor" transform={`translate(${cursor[0]} ${cursor[1]})`} dangerouslySetInnerHTML={{ __html: cursorSvg }} /> : null}
-      </svg>
+          <DocIconsLayer
+            key={`icons-${ctx.replayKey}`}
+            icons={ctx.icons.filter((ic) => !played.has(`i${ic.id}`))}
+            reveal={ctx.icons.filter((ic) => !played.has(`i${ic.id}`)).map((ic) => timing.icons[ctx.icons.indexOf(ic)])}
+            onDone={onIconDone}
+          />
+          <g data-slot="sketchpad-strokes" key={ctx.replayKey}>
+            {strokeInfos.map(({ s, m }, i) =>
+              played.has(`s${s.id}`) ? null : (
+                <StrokeShape
+                  key={s.id}
+                  stroke={s}
+                  m={m}
+                  dim={erasing.has(s.id)}
+                  replay={timing.strokes[i]}
+                  onDone={onStrokeDone}
+                  maskId={`ll-replay-${uid}-${i}`}
+                />
+              ),
+            )}
+          </g>
+        </svg>
+      )}
       <span id={help} className="sr-only">
         Draw with a pointer, or use the arrow keys to move a cursor and Enter to put the pen down and lift it. F, B, P, M, H and E pick a tool, the bracket keys change the width, Control Z undoes. Wheel pans, Control wheel zooms, Space drag or middle drag pans, 0 resets the view.
       </span>

@@ -501,7 +501,13 @@ export class CanvasState {
   }
 
   private snapshot(): CanvasContent {
-    return { strokes: this.doc.strokes, texts: this.doc.texts, icons: this.doc.icons, groups: this.doc.groups };
+    /* groups 深拷贝：append 之后的 registerGroup/序调整会原地改组对象，共享引用会让 undo 无法回滚组状态 */
+    return {
+      strokes: this.doc.strokes,
+      texts: this.doc.texts,
+      icons: this.doc.icons,
+      groups: this.doc.groups.map((g) => ({ ...g, strokeIds: [...g.strokeIds], textIds: [...g.textIds], iconIds: g.iconIds ? [...g.iconIds] : undefined })),
+    };
   }
 
   /** 全量替换内容（页面擦除/撤销/清空后的 PUT 全覆盖；texts 省略 = 保留现有文本） */
@@ -518,18 +524,46 @@ export class CanvasState {
     this.replaceStrokes([...this.doc.strokes, ...strokes], texts.length ? [...this.doc.texts, ...texts] : undefined);
   }
 
-  /** 把这批笔迹/文本/icon 归到命名组（同名合并）。draw 带 group 时调用——这是语义绑定的入口 */
-  registerGroup(name: string, strokeIds: string[], textIds: string[], iconIds: string[] = []): void {
+  /** 把这批笔迹/文本/icon 归到命名组（同名合并）。draw 带 group 时调用——这是语义绑定的入口；
+   *  order = 叙事层级（回放排序键），同名重画带 order 则覆盖，不带则保留原值 */
+  registerGroup(name: string, strokeIds: string[], textIds: string[], iconIds: string[] = [], order?: number): void {
     if (!strokeIds.length && !textIds.length && !iconIds.length) return;
     const g = this.doc.groups.find((x) => x.name === name);
     if (g) {
       g.strokeIds.push(...strokeIds);
       g.textIds.push(...textIds);
       g.iconIds = [...(g.iconIds ?? []), ...iconIds];
+      if (order !== undefined) g.order = order;
     } else {
-      this.doc.groups.push({ name, strokeIds: [...strokeIds], textIds: [...textIds], iconIds: [...iconIds] });
+      this.doc.groups.push({ name, strokeIds: [...strokeIds], textIds: [...textIds], iconIds: [...iconIds], order });
     }
     this.save();
+  }
+
+  /** 事后调整各组叙事层级（sketchpad order 命令）：未知名进 unknown 不报错；值无变化不动撤销栈。
+   *  groups 在 CanvasContent 快照内，undo/redo 自动恢复层级 */
+  setGroupOrders(entries: Array<{ name: string; order: number }>): { updated: number; unknown: string[] } {
+    const before = this.snapshot();
+    let changed = false;
+    let updated = 0;
+    const unknown: string[] = [];
+    for (const { name, order } of entries) {
+      const g = this.doc.groups.find((x) => x.name === name);
+      if (!g) {
+        unknown.push(name);
+        continue;
+      }
+      if (g.order === order) continue;
+      g.order = order;
+      changed = true;
+      updated += 1;
+    }
+    if (!changed) return { updated: 0, unknown };
+    this.past.push(before);
+    if (this.past.length > HISTORY_MAX) this.past.shift();
+    this.future = [];
+    this.touch();
+    return { updated, unknown };
   }
 
   /** 按名删除整组：擦掉该组所有笔迹/文本/icon，并从分组表移除。返回删除数 */
@@ -578,6 +612,7 @@ export class CanvasState {
         strokeIds: g.strokeIds.filter((id) => !drop.has(id)),
         textIds: g.textIds.filter((id) => !drop.has(id)),
         iconIds: (g.iconIds ?? []).filter((id) => !drop.has(id)),
+        order: g.order,
       }))
       .filter((g) => g.strokeIds.length || g.textIds.length || g.iconIds?.length);
     this.touch();

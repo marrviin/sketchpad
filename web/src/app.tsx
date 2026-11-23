@@ -13,10 +13,15 @@ import type { SketchColor, SketchStroke, SketchText, SketchTool, SketchpadView }
 import {
   Sketchpad,
   SketchpadCanvas,
-  clampZoom,
   type SketchpadHandle,
 } from "@/components/ui/sketchpad";
 import { DAEMON_BASE } from "./base";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 /**
  * 画板页：looseleaf Sketchpad 组件全页铺开 + 画板后端同步（多画布）。
@@ -35,6 +40,16 @@ interface DocState {
   strokes: SketchStroke[];
   texts: SketchText[];
   icons?: SketchIcon[];
+  /** 语义分组（叙事层级）：随文档整体返回，传给 Sketchpad 供回放编排 */
+  groups?: DocGroup[];
+}
+
+interface DocGroup {
+  name: string;
+  strokeIds: string[];
+  textIds: string[];
+  iconIds?: string[];
+  order?: number;
 }
 
 interface SketchIcon {
@@ -64,22 +79,8 @@ function canvasLabel(c: CanvasMeta): string {
   return at;
 }
 
-/** 每块画布的视口（平移+缩放）存 localStorage——不进文档，避免视口操作空转 rev */
-const viewKey = (canvasId: string | null) => `cf-sketchpad-view-${canvasId ?? "local"}`;
+/** 首屏/切画布视口一律回默认原点：交给画布 autoFit / fitHome 做内容取景（fit+center） */
 const HOME_VIEW: SketchpadView = { x: 0, y: 0, zoom: 1 };
-
-/** 返回 null = 无保存视口（首帧交给画布 autoFit 适配首页画框） */
-function loadView(canvasId: string | null): SketchpadView | null {
-  try {
-    const raw = localStorage.getItem(viewKey(canvasId));
-    if (!raw) return null;
-    const v = JSON.parse(raw) as SketchpadView;
-    if (typeof v.x !== "number" || typeof v.y !== "number" || typeof v.zoom !== "number") return null;
-    return { x: v.x, y: v.y, zoom: clampZoom(v.zoom) };
-  } catch {
-    return null;
-  }
-}
 
 /** 新建画布按钮里的加号（与 workflow 图标同形的内联 SVG，避免跨 app 引用） */
 function PlusIcon({ size = 14 }: { size?: number }) {
@@ -118,8 +119,8 @@ function SketchpadPage() {
   const apiRef = useRef<SketchpadHandle>(null);
   /** 无限画布视口（受控传给 Sketchpad；随画布 id 持久化到 localStorage） */
   const [view, setView] = useState<SketchpadView>(HOME_VIEW);
-  /** 回放倍速：组件按此分母缩短每笔时长（查看器模式无 UI 入口，保持 1×） */
-  const replaySpeed = 1;
+  /** 回放倍速：组件按此分母缩短每笔时长（查看器模式无 UI 入口，默认 8× 便于演示） */
+  const replaySpeed = 8;
   /** 已知的服务端 rev：自己的变更由 PUT/POST 响应先行更新，SSE 里相同的 rev 不再回流拉取 */
   const revRef = useRef(-1);
   /** 本地已知的文本元素（agent-only；PUT 回流时随 payload 原样带回，清空时置 []） */
@@ -133,43 +134,15 @@ function SketchpadPage() {
     setDoc(d);
   }, []);
 
-  /* 视口随画布切换：载入该画布上次保存的视口；无保存时 autoFit 交画布首帧适配；变更即写回 localStorage */
-  const [autoFit, setAutoFit] = useState(true);
-  // 视口写盘去抖：手势期间滚轮每帧都触发 updateView，同步 localStorage.setItem 会卡主线程
-  // （workflow 的 React Flow 内部持久化不在每帧 React 里）——按画布 id 暂存，手势停 300ms 才落盘
-  const pendingViews = useRef(new Map<string, SketchpadView>());
-  const viewSaveTimer = useRef(0);
-  const flushPendingViews = useCallback(() => {
-    pendingViews.current.forEach((v, id) => {
-      try {
-        localStorage.setItem(viewKey(id), JSON.stringify(v));
-      } catch {
-        /* 存不了就算了（隐私模式等），视口仍是会话内有效 */
-      }
-    });
-    pendingViews.current.clear();
-  }, []);
-  useEffect(
-    () => () => {
-      window.clearTimeout(viewSaveTimer.current);
-      flushPendingViews();
-    },
-    [flushPendingViews],
-  );
+  /* 视口随画布切换：一律回默认原点，交画布 autoFit 居中取景；用户手势后由画布停止接管 */
   const updateView = useCallback(
     (v: SketchpadView) => {
       setView(v);
-      setAutoFit(false);
-      pendingViews.current.set(viewKey(canvasId), v);
-      window.clearTimeout(viewSaveTimer.current);
-      viewSaveTimer.current = window.setTimeout(flushPendingViews, 300);
     },
-    [canvasId, flushPendingViews],
+    [],
   );
   useEffect(() => {
-    const saved = loadView(canvasId);
-    setAutoFit(!saved);
-    setView(saved ?? HOME_VIEW);
+    setView(HOME_VIEW);
   }, [canvasId]);
 
   /* 画布解析 + 初始文档：?c= 校验存在（无效参数回落活动画布并改写 URL）；拉不到即进入本地模式 */
@@ -248,6 +221,18 @@ function SketchpadPage() {
     const t = window.setTimeout(() => setCanvasRevealed(true), 450);
     return () => window.clearTimeout(t);
   }, [hasContent, canvasId, doc, offline]);
+
+  /* 叙事回放（?replay=1）：揭示门完成后自动回放一次——按叙事层级逐组逐笔播放（演示/验证入口，
+     不提供页面按钮）。同一画布只播一次；切画布重置 */
+  const replayParam = searchParams.get("replay");
+  const replayedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!replayParam || !canvasId || !canvasRevealed) return;
+    if (replayedFor.current === canvasId) return;
+    replayedFor.current = canvasId;
+    const t = window.setTimeout(() => apiRef.current?.replay(), 120);
+    return () => window.clearTimeout(t);
+  }, [replayParam, canvasId, canvasRevealed]);
 
   /** 本页笔迹变更（画一笔/擦除/撤销/重做/清空）→ 全量 PUT 覆盖（带 baseRev 乐观锁，按画布）。
    *  文本元素（agent-only）随 PUT 原样回流：清空时置 []，其余场景沿用本地已知值。
@@ -338,11 +323,8 @@ function SketchpadPage() {
   }, [offline]);
 
   if (!doc) {
-    return (
-      <main className="flex min-h-dvh items-center justify-center p-6 text-sm text-muted-foreground">
-        画板加载中…
-      </main>
-    );
+    // 文档未到位：空白过场（不做任何加载提示，fit 揭示门会让内容就绪后直接出现）
+    return <main className="min-h-dvh" />;
   }
 
   return (
@@ -384,31 +366,42 @@ function SketchpadPage() {
         )}
       </header>
       <div className="relative min-h-0 flex-1">
-        <Sketchpad
-          className="absolute inset-0"
-          data-canvas-revealed={canvasRevealed ? "ready" : "pending"}
-          width={doc.width}
-          height={doc.height}
-          view={view}
-          onViewChange={updateView}
-          seed={`cf-sketchpad-${canvasId ?? "local"}`}
-          apiRef={apiRef}
-          replaySpeed={replaySpeed}
-          panMode
-          value={doc.strokes}
-          texts={doc.texts}
-          icons={doc.icons}
-          onValueChange={pushStrokes}
-          tool={doc.tool}
-          onToolChange={(tool) => pushPrefs({ tool })}
-          color={doc.color}
-          onColorChange={(color) => pushPrefs({ color })}
-          size={doc.size}
-          onSizeChange={(size) => pushPrefs({ size })}
-        >
-          {/* 查看器模式：页面只负责展示与导航（拖拽/滚轮），内容全部经 agent 操作 */}
-          <SketchpadCanvas className="min-h-0 flex-1" label="Sketchpad" autoFit={autoFit} />
-        </Sketchpad>
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <Sketchpad
+              className="absolute inset-0"
+              data-canvas-revealed={canvasRevealed ? "ready" : "pending"}
+              width={doc.width}
+              height={doc.height}
+              view={view}
+              onViewChange={updateView}
+              seed={`cf-sketchpad-${canvasId ?? "local"}`}
+              apiRef={apiRef}
+              replaySpeed={replaySpeed}
+              panMode
+              value={doc.strokes}
+              texts={doc.texts}
+              icons={doc.icons}
+              groups={doc.groups}
+              onValueChange={pushStrokes}
+              tool={doc.tool}
+              onToolChange={(tool) => pushPrefs({ tool })}
+              color={doc.color}
+              onColorChange={(color) => pushPrefs({ color })}
+              size={doc.size}
+              onSizeChange={(size) => pushPrefs({ size })}
+            >
+              {/* 查看器模式：页面只负责展示与导航（拖拽/滚轮），内容全部经 agent 操作 */}
+              <SketchpadCanvas className="min-h-0 flex-1" label="Sketchpad" autoFit />
+            </Sketchpad>
+          </ContextMenuTrigger>
+          {/* 右键菜单：叙事回放（空画布禁用） */}
+          <ContextMenuContent className="w-40">
+            <ContextMenuItem disabled={!hasContent} onSelect={() => apiRef.current?.replay()}>
+              回放
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
       </div>
     </main>
   );

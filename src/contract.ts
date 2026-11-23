@@ -137,6 +137,8 @@ export interface ElementGroup {
   textIds: string[];
   /** icon 元素 id（1:1 looseleaf icon 也是可擦成员） */
   iconIds?: string[];
+  /** 叙事层级（1=画布/设备框 … 5=标注）：回放按此排序，无值排最后 */
+  order?: number;
 }
 
 /* ===== 画板文档（落盘格式 sketch.json） ===== */

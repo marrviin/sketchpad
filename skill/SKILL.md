@@ -43,6 +43,24 @@ sketchpad draw '{"canvas":"<id>","group":"数据库","shapes":[新形状]}'  # �
 - 同名 group 多次 draw 会**合并**进同一组；erase 按名删整组后再画同名会重建。
 - 页面手画的笔迹没有 group（agent-only 语义）；页面 PUT 回流不会冲掉 agent 的组。
 
+## 叙事层级：按产品叙事画，回放按叙事播
+
+给每批 draw 带 `group` + `order`（叙事层级），且**实际绘制顺序也按层级推进**——先背景后内容、主内容沿用户动线，回放/演示时逐级铺开，像讲产品而不是乱画：
+
+```bash
+sketchpad draw '{"canvas":"<id>","group":"设备框","order":1,"shapes":[…]}'   # ① 先画画布/设备框
+sketchpad draw '{"canvas":"<id>","group":"骨架分区","order":2,"shapes":[…]}'  # ② 再画分区/导航骨架
+sketchpad draw '{"canvas":"<id>","group":"主流程","order":3,"shapes":[…]}'    # ③ 主内容按用户动线
+sketchpad draw '{"canvas":"<id>","group":"次级内容","order":4,"shapes":[…]}'  # ④ 次级内容/卡片
+sketchpad draw '{"canvas":"<id>","group":"标注","order":5,"shapes":[…]}'      # ⑤ 最后标注/说明
+sketchpad order '{"canvas":"<id>","orders":{"标注":5,"主流程":3}}'            # 画完可事后修序（可撤销）
+```
+
+- **规范五级**：1 画布/设备框 → 2 骨架分区 → 3 主内容/用户动线 → 4 次级内容 → 5 标注。可超五级（如主流程内多步 3/4/5…），数字不必连续，回放按数值升序。
+- `order` 必须与 `group` 同时给；同名组重画时带新 `order` 即覆盖。绘制批次严格按 level 从低到高发——观看页面直播时就是正确的产品节奏。
+- 回放规则（页面 `?c=<id>&replay=1` 触发，或演示给用户看）：按层级逐组逐笔播放，组间停顿 ~0.35s；无 order 的组排在最后；无组笔迹最后按文档顺序。无分组画布回放 = 文档顺序（原行为）。
+- 画完发现顺序不对（如标注混进了中间）→ `state {"ids":true}` 看各组「阶段」→ `sketchpad order` 修序，不用重画。
+
 ## 画得好：质量基线（所有场景通用）
 
 > "好"= 布局合理且正确，不只是美观。这是用户反复反馈的问题清单，开画前和每批自查时对照。

@@ -52,16 +52,20 @@ const prefsSchema = z
     message: "tool / color / size 至少给一项",
   });
 
-const drawSchema = z.object({
-  shapes: z.array(shapeSchema).min(1).max(200),
-  /** 坐标单位：px = 画布像素（默认）；norm = 0~1 归一化（相对画布宽高，长度类字段同比例缩放） */
-  unit: z.enum(["px", "norm"]).optional(),
-  tool: z.enum(DRAW_TOOLS).optional(),
-  color: z.enum(SKETCH_COLORS).optional(),
-  size: sizeSchema.optional(),
-  /** 语义分组名：这批形状归入该组，以后按名擦/按名改（如 "数据库" "登录按钮"） */
-  group: z.string().min(1).max(40).optional(),
-});
+const drawSchema = z
+  .object({
+    shapes: z.array(shapeSchema).min(1).max(200),
+    /** 坐标单位：px = 画布像素（默认）；norm = 0~1 归一化（相对画布宽高，长度类字段同比例缩放） */
+    unit: z.enum(["px", "norm"]).optional(),
+    tool: z.enum(DRAW_TOOLS).optional(),
+    color: z.enum(SKETCH_COLORS).optional(),
+    size: sizeSchema.optional(),
+    /** 语义分组名：这批形状归入该组，以后按名擦/按名改（如 "数据库" "登录按钮"） */
+    group: z.string().min(1).max(40).optional(),
+    /** 叙事层级（1=画布/设备框 … 5=标注），存到分组上供回放排序；必须与 group 同时给 */
+    order: z.number().int().min(1).max(999).optional(),
+  })
+  .refine((d) => d.order === undefined || !!d.group, { message: "order 需与 group 同时给" });
 
 const putSchema = z.object({
   /** 客户端发起覆盖时已知的 rev（乐观锁）：与服务端当前 rev 不一致即 409，页面重拉合并后重试 */
@@ -208,7 +212,7 @@ export function startBackend(o: BackendOptions = {}): http.Server {
         json(res, { error: parsed.error.issues[0]?.message ?? "参数不合法" }, 400);
         return;
       }
-      const { shapes, unit, tool, color, size, group } = parsed.data;
+      const { shapes, unit, tool, color, size, group, order } = parsed.data;
       let clamped = 0;
       const built = shapes.flatMap((s, i) => {
         const norm = unit === "norm" ? normalizeShape(s, st.doc.width, st.doc.height) : s;
@@ -231,9 +235,9 @@ export function startBackend(o: BackendOptions = {}): http.Server {
       const strokeIds = strokes.map((s) => s.id);
       const textIds = texts.map((t) => t.id);
       const iconIds = icons.map((i) => i.id);
-      if (group) st.registerGroup(group, strokeIds, textIds, iconIds);
+      if (group) st.registerGroup(group, strokeIds, textIds, iconIds, order);
       broadcast(id);
-      json(res, { id, rev: st.doc.rev, added: strokes.length + texts.length + icons.length, texts: texts.length, icons: icons.length, strokes: st.doc.strokes.length, textsTotal: st.doc.texts.length, clamped, strokeIds, textIds, iconIds, group: group ?? null });
+      json(res, { id, rev: st.doc.rev, added: strokes.length + texts.length + icons.length, texts: texts.length, icons: icons.length, strokes: st.doc.strokes.length, textsTotal: st.doc.texts.length, clamped, strokeIds, textIds, iconIds, group: group ?? null, order: order ?? null });
       return;
     }
     /* stamp：追加 CLI 侧预编译好的笔迹（grid 等本地生成的形状），id/钳制由后端统一处理 */
@@ -287,6 +291,42 @@ export function startBackend(o: BackendOptions = {}): http.Server {
       }
       broadcast(id);
       json(res, { id, rev: st.doc.rev, removedStrokes: rs.strokes, removedTexts: rs.texts, removedIcons: rs.icons, groupFound, strokes: st.doc.strokes.length, texts: st.doc.texts.length });
+      return;
+    }
+    /* 事后调整分组叙事层级：{orders: {组名: 层级}}（或 [{name, order}] 数组），未知名报 unknown 不报错 */
+    if (op === "order" && method === "POST") {
+      const orderEntry = z.object({
+        name: z.string().min(1).max(40),
+        order: z.number().int().min(1).max(999),
+      });
+      const orderSchema = z
+        .object({
+          orders: z
+            .union([
+              z.record(z.string().min(1).max(40), z.number().int().min(1).max(999)),
+              z.array(orderEntry).min(1).max(50),
+            ])
+        })
+        .transform((d) => {
+          const entries: Array<{ name: string; order: number }> = Array.isArray(d.orders)
+            ? d.orders
+            : Object.entries(d.orders).map(([name, order]) => ({ name, order }));
+          return entries;
+        });
+      const parsed = orderSchema.safeParse(body);
+      if (!parsed.success) {
+        json(res, { error: parsed.error.issues[0]?.message ?? "参数不合法" }, 400);
+        return;
+      }
+      const r = st.setGroupOrders(parsed.data);
+      broadcast(id);
+      json(res, {
+        id,
+        rev: st.doc.rev,
+        updated: r.updated,
+        unknown: r.unknown,
+        groups: st.doc.groups.map((g) => ({ name: g.name, order: g.order ?? null })),
+      });
       return;
     }
     if (op === "undo" && method === "POST") {
