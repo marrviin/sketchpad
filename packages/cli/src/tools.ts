@@ -10,15 +10,75 @@ import { COLOR_LABEL, DRAW_TOOLS, SKETCH_COLORS, SKETCH_SIZES, SKETCH_TOOLS, STE
 import { renderDocSvg, resolveFontFile, FONT_FAMILY, TOOL_STYLE } from "./render.js";
 import { projectRoot } from "./paths.js";
 import { sketchpadApi, sketchpadUrl, ensureSketchpadRoute } from "./route.js";
-import { composeShapes } from "./compose.js";
+import { composeBatches } from "./compose.js";
 import { lintDoc } from "./lint.js";
 
 /** 快照渲染只需要文档形状（与 backend 的 CanvasDoc 同形），避免拉入完整文档模块 */
 type CanvasDocShape = { rev: number; width: number; height: number; strokes: SketchStroke[]; texts: SketchText[]; icons?: { id: string; name: string; x: number; y: number; size: number; color: SketchColor }[] };
 
+type DocGroups = { name: string; strokeIds: string[]; textIds: string[]; iconIds?: string[]; order?: number }[];
+
+/** 笔迹几何长度（回放时长估算：与页面 replaySpeed=8、0.14~2.4s 钳制同口径） */
+function strokeSeconds(s: SketchStroke): number {
+  let len = 0;
+  for (let i = 1; i < s.pts.length; i++) {
+    len += Math.hypot(s.pts[i][0] - s.pts[i - 1][0], s.pts[i][1] - s.pts[i - 1][1]);
+  }
+  return Math.min(2.4, Math.max(0.14, len / (420 * 8))) + 0.08;
+}
+
+/** 叙事大纲：回放按「组 order 升序、同序按创建序、无组垫底」编排（与 web replay-order 同口径），
+ *  这里给出各幕清单与预计时长——agent 演示前读一遍故事线，检查叙事是否清晰 */
+function narrativeOutline(doc: { strokes: SketchStroke[]; texts: SketchText[]; icons?: { id: string }[]; groups?: DocGroups }): string {
+  const groups = doc.groups ?? [];
+  const byStroke = new Map(doc.strokes.map((s, i) => [s.id, i] as const));
+  const byText = new Map((doc.texts ?? []).map((t, i) => [t.id, i] as const));
+  const byIcon = new Map((doc.icons ?? []).map((c, i) => [c.id, i] as const));
+  interface Chunk { name: string; order: number; strokes: SketchStroke[]; texts: number; icons: number; firstDoc: number }
+  const chunks: Chunk[] = [];
+  let claimed = 0;
+  for (const g of groups) {
+    const member = g.strokeIds.filter((id) => byStroke.has(id));
+    const n = member.length + g.textIds.length + (g.iconIds?.length ?? 0);
+    if (!n) continue;
+    claimed += n;
+    const firstDoc = Math.min(
+      ...member.map((id) => byStroke.get(id)!),
+      ...g.textIds.filter((id) => byText.has(id)).map((id) => byStroke.size + byText.get(id)!),
+      ...(g.iconIds ?? []).filter((id) => byIcon.has(id)).map((id) => byStroke.size + byText.size + byIcon.get(id)!),
+    );
+    chunks.push({
+      name: g.name,
+      order: g.order ?? Infinity,
+      strokes: member.map((id) => byStroke.get(id)!).map((i) => doc.strokes[i]),
+      texts: g.textIds.length,
+      icons: g.iconIds?.length ?? 0,
+      firstDoc,
+    });
+  }
+  const ungrouped = doc.strokes.length + (doc.texts?.length ?? 0) + (doc.icons?.length ?? 0) - claimed;
+  chunks.sort((a, b) => (a.order !== b.order ? a.order - b.order : a.firstDoc - b.firstDoc));
+  if (ungrouped > 0) {
+    chunks.push({ name: "（未分组）", order: Infinity, strokes: [], texts: 0, icons: ungrouped, firstDoc: Infinity });
+  }
+  const total = chunks.reduce((sec, c) => sec + c.strokes.reduce((s, st) => s + strokeSeconds(st), 0) + (c.texts + c.icons) * 0.25 + (chunks.length > 1 ? 0.35 : 0), 0);
+  const lines = [`叙事大纲（${chunks.length} 幕，预计回放 ~${Math.round(total)}s，页面 ?c=<id>&replay=1 播放）：`];
+  chunks.forEach((c, i) => {
+    const dur = c.strokes.reduce((s, st) => s + strokeSeconds(st), 0) + (c.texts + c.icons) * 0.25;
+    lines.push(
+      `  ${i + 1}. 「${c.name}」${c.order === Infinity ? "order=—（垫底）" : `order=${c.order}`} · ` +
+        `${c.strokes.length} 笔迹${c.texts ? `+${c.texts} 文本` : ""}${c.icons ? `+${c.icons} icon` : ""} · ~${dur.toFixed(1)}s`,
+    );
+  });
+  const noOrder = groups.filter((g) => g.order === undefined && (g.strokeIds.length || g.textIds.length || (g.iconIds?.length ?? 0)));
+  if (noOrder.length) {
+    lines.push(`  ⚠ ${noOrder.length} 个组未设 order（${noOrder.map((g) => `「${g.name}」`).join("，")}），回放垫底——用 sketchpad order 修序`);
+  }
+  return lines.join("\n");
+}
+
 /** 内容包围盒 ∪ 首页画框，四周 pad——首页框内内容取景与固定画布一致，框外内容自动扩进来 */
-function contentBBox(doc: CanvasDocShape): { x0: number; y0: number; w: number; h: number } {
-  let x0 = 0;
+function contentBBox(doc: CanvasDocShape): { x0: number; y0: number; w: number; h: number } {  let x0 = 0;
   let y0 = 0;
   let x1 = doc.width;
   let y1 = doc.height;
@@ -146,13 +206,14 @@ export function sketchpadToolDefs(): ToolDef[] {
       title: "查看画板状态",
       description:
         "查看画板当前状态：画布 id 与尺寸、当前默认画笔/颜色/粗细、笔迹数、修订号、在线页面数、历史画布列表与页面 URL。" +
-        "full=true 时附带完整笔迹 JSON（画前规划构图或分析已有内容时用）。",
+        "full=true 时附带完整笔迹 JSON（画前规划构图或分析已有内容时用）；narrative=true 时附带叙事大纲（各幕按回放顺序 + 预计时长，演示前检查故事线）。",
       inputSchema: {
         canvas: makeCanvasInput(),
         full: z.boolean().optional().describe("是否附带完整笔迹 JSON"),
         ids: z.boolean().optional().describe("是否附带元素清单（id · 类型 · 摘要，配合 sketchpad_erase 局部修正）"),
+        narrative: z.boolean().optional().describe("是否附带叙事大纲（各幕按回放顺序 + 预计时长，演示前检查故事线用）"),
       },
-      handler: async ({ canvas, full, ids }) => {
+      handler: async ({ canvas, full, ids, narrative }) => {
         try {
           const list = await sketchpadApi<{ canvases: { id: string; updatedAt: string; strokes: number }[]; active: string }>(
             "/canvases",
@@ -186,6 +247,9 @@ export function sketchpadToolDefs(): ToolDef[] {
               for (const g of groups)
                 lines.push(`  「${g.name}」${g.strokeIds.length} 笔迹 + ${g.textIds.length} 文本${g.iconIds?.length ? ` + ${g.iconIds.length} icon` : ""} → 阶段 ${g.order ?? "—"}`);
             }
+          }
+          if (narrative) {
+            lines.push("", narrativeOutline(doc as unknown as Parameters<typeof narrativeOutline>[0]));
           }
           lines.push("", "并发作画请先 sketchpad_new_canvas 各自建画布，之后所有工具带上 canvas id。");
           return textResult(lines.join("\n"));
@@ -325,7 +389,8 @@ export function sketchpadToolDefs(): ToolDef[] {
       title: "场景构图",
       description:
         "场景级确定性构图：给结构化场景描述（而不是手排坐标），一次调用画出对齐、间距、连线起止都正确的结构骨架。" +
-        "产出的形状带 group/order 语义（默认组名按场景、order=3 主内容），叙事回放按层级编排。画完用 sketchpad_snapshot 自查。\n" +
+        "产出按叙事分幕——流程图沿图逐节点（入边先画、节点后现）、时序图逐消息一幕、原型按 设备框→分区 分层；" +
+        "每幕一个语义组（节点用 label 命名，可用 group 参数加前缀、order 参数调主层级），叙事回放沿图讲故事。画完用 sketchpad_snapshot 自查。\n" +
         "scene=flow 流程图：nodes [{id,label,kind?,icon?}]+edges [{from,to,label?,dashed?}]，dir=tb(默认)/lr。" +
         "kind: start/end=椭圆（首尾） process=圆角矩形（默认） decision=菱形（分支判断）；icon 为 looseleaf 名画在文字上方。\n" +
         "scene=sequence 时序图：participants [{id,label}]+messages [{from,to,label?,kind?:solid|dashed}]（按发生顺序；from===to 画自调用回环）。\n" +
@@ -334,7 +399,7 @@ export function sketchpadToolDefs(): ToolDef[] {
       inputSchema: {
         canvas: makeCanvasInput(),
         scene: z.enum(["flow", "sequence", "wireframe"]).describe("场景类型"),
-        group: z.string().min(1).max(40).optional().describe("语义分组名（缺省：流程图/时序图/原型）"),
+        group: z.string().min(1).max(40).optional().describe("组名前缀：各幕组名为「前缀·名」（缺省前缀：流程图/时序图/原型；节点/消息/分区以自身 label 为名）"),
         order: z.number().int().min(1).max(999).optional().describe("叙事层级（缺省 3=主内容）"),
         nodes: z.array(z.object({ id: z.string().min(1).max(30), label: z.string().min(1).max(24), kind: z.enum(["start", "end", "process", "decision"]).optional(), icon: z.string().max(40).optional() })).max(24).optional().describe("flow：节点列表"),
         edges: z.array(z.object({ from: z.string().min(1).max(30), to: z.string().min(1).max(30), label: z.string().max(12).optional(), dashed: z.boolean().optional() })).max(40).optional().describe("flow：连线列表"),
@@ -348,28 +413,44 @@ export function sketchpadToolDefs(): ToolDef[] {
       handler: async (args) => {
         try {
           const scene = args.scene as "flow" | "sequence" | "wireframe";
-          const defaultGroup = { flow: "流程图", sequence: "时序图", wireframe: "原型" }[scene];
-          const shapes = composeShapes({
-            scene,
-            nodes: args.nodes,
-            edges: args.edges,
-            dir: args.dir,
-            participants: args.participants,
-            messages: args.messages,
-            frame: args.frame,
-            regions: args.regions,
-            title: args.title,
-          } as never);
-          if (!shapes.length) return textResult("没有可绘制的内容（输入为空）", true);
-          const r = await sketchpadApi<{ id: string; rev: number; added: number; texts: number; icons: number; strokes: number; clamped: number; strokeIds: string[]; textIds: string[]; iconIds: string[] }>(
-            canvasPath(args.canvas, "draw"),
-            { method: "POST", body: JSON.stringify({ shapes, group: args.group ?? defaultGroup, order: args.order ?? 3 }) },
+          const prefix = { flow: "流程图", sequence: "时序图", wireframe: "原型" }[scene];
+          const batches = composeBatches(
+            {
+              scene,
+              nodes: args.nodes,
+              edges: args.edges,
+              dir: args.dir,
+              participants: args.participants,
+              messages: args.messages,
+              frame: args.frame,
+              regions: args.regions,
+              title: args.title,
+            } as never,
+            args.group ?? prefix,
+            args.order ?? 3,
           );
-          const warn = r.clamped > 0 ? `（${r.clamped} 个点越界已钳回）` : "";
+          if (!batches.length) return textResult("没有可绘制的内容（输入为空）", true);
+          // 逐幕落笔：每批一个语义组 + 叙事层级，回放按幕推进（批序 = 回放序）
+          let added = 0;
+          let texts = 0;
+          let icons = 0;
+          let strokes = 0;
+          let canvasId = "";
+          for (const b of batches) {
+            const r = await sketchpadApi<{ id: string; rev: number; added: number; texts: number; icons: number; strokes: number }>(
+              canvasPath(args.canvas, "draw"),
+              { method: "POST", body: JSON.stringify({ shapes: b.shapes, group: b.group, order: b.order }) },
+            );
+            canvasId = r.id;
+            added += r.added;
+            texts += r.texts;
+            icons += r.icons;
+            strokes += r.strokes;
+          }
           return textResult(
-            `画布 ${r.id} 已按「${scene}」场景构图落笔：${r.added} 个元素（${r.strokes} 笔迹 + ${r.texts} 标注 + ${r.icons} icon）${warn}，` +
-              `归入分组「${args.group ?? defaultGroup}」order=${args.order ?? 3}。` +
-              `用 sketchpad_snapshot 自查；要加手绘细节（涂改痕迹/装饰/更细标注）在骨架坐标上继续 draw，勿覆盖此组。`,
+            `画布 ${canvasId} 已按「${scene}」场景分 ${batches.length} 幕落笔：共 ${added} 个元素（${strokes} 笔迹 + ${texts} 标注 + ${icons} icon）。` +
+              `每幕一个语义组（${batches.map((b) => `「${b.group}」order=${b.order}`).join("、")}），回放按幕推进、沿图讲故事。` +
+              `用 sketchpad_snapshot 自查；手绘细节（涂改痕迹/装饰/强调）在骨架坐标上继续 draw，勿覆盖这些组。`,
           );
         } catch (e) {
           return textResult(`构图失败：${(e as Error).message}`, true);
@@ -381,7 +462,8 @@ export function sketchpadToolDefs(): ToolDef[] {
       name: "sketchpad_lint",
       title: "几何自查",
       description:
-        "画布几何检查，把「画得不好」的可计算信号变成清单：文本互相重叠、文本被笔迹划过（压在框线/箭头上）、文本/icon 超出首页画框、笔迹大幅出框。" +
+        "画布自查，把「画得不好」的可计算信号变成清单。几何：文本互相重叠、文本被笔迹划过（压在框线/箭头上）、文本/icon 超出首页画框、笔迹大幅出框；" +
+        "叙事：未设 order 的组（回放垫底）、单组吞掉全图（回放没节奏）、标注层级混入大量结构笔迹。" +
         "返回问题列表与元素 id——用 sketchpad_erase 删掉重画即可修。画完一批结构后、snapshot 目测前先 lint 一次，构成完整自查回路。",
       inputSchema: {
         canvas: makeCanvasInput(),

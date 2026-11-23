@@ -672,7 +672,7 @@ export class CanvasState {
     this.touch();
   }
 
-  /** 清空全部内容（笔迹+文本+icon，进撤销栈可恢复） */
+  /** 清空全部内容（笔迹+文本+icon+语义组，进撤销栈可恢复） */
   clearAll(): number {
     const n = this.doc.strokes.length + this.doc.texts.length + this.doc.icons.length;
     if (!n) return 0;
@@ -682,6 +682,7 @@ export class CanvasState {
     this.doc.strokes = [];
     this.doc.texts = [];
     this.doc.icons = [];
+    this.doc.groups = [];
     this.touch();
     return n;
   }

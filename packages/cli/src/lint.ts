@@ -13,7 +13,15 @@ interface Box {
 }
 
 export interface LintIssue {
-  kind: "text-overlap" | "text-cross-border" | "text-outside-frame" | "stroke-outside-frame" | "text-icon-overlap";
+  kind:
+    | "text-overlap"
+    | "text-cross-border"
+    | "text-outside-frame"
+    | "stroke-outside-frame"
+    | "text-icon-overlap"
+    | "narrative-no-order"
+    | "narrative-coarse"
+    | "narrative-mixed";
   severity: "error" | "warn" | "info";
   msg: string;
   ids: string[];
@@ -90,6 +98,7 @@ export function lintDoc(doc: {
   strokes: SketchStroke[];
   texts: SketchText[];
   icons?: SketchIcon[];
+  groups?: { name: string; strokeIds: string[]; textIds: string[]; iconIds?: string[]; order?: number }[];
 }): LintIssue[] {
   const issues: LintIssue[] = [];
   const texts = doc.texts ?? [];
@@ -201,6 +210,53 @@ export function lintDoc(doc: {
       msg: `${stray} 条笔迹明显超出首页画框（若非有意的框外延伸，考虑重画或调整取景）`,
       ids: strayIds,
     });
+  }
+
+  // 5. 叙事体检：回放讲故事的质量信号（建议级，不影响画面正确性）。组员只数仍存在的元素——
+  //    历史清除/擦除可能留下陈旧 id，统计口径以画布实际内容为准
+  const strokeIds = new Set(doc.strokes.map((s) => s.id));
+  const textIds = new Set(texts.map((t) => t.id));
+  const iconIds = new Set((doc.icons ?? []).map((c) => c.id));
+  const alive = (g: { strokeIds: string[]; textIds: string[]; iconIds?: string[] }) => ({
+    strokes: g.strokeIds.filter((id) => strokeIds.has(id)),
+    texts: g.textIds.filter((id) => textIds.has(id)),
+    icons: (g.iconIds ?? []).filter((id) => iconIds.has(id)),
+  });
+  const groups = (doc.groups ?? [])
+    .map((g) => ({ g, m: alive(g) }))
+    .filter((x) => x.m.strokes.length || x.m.texts.length || x.m.icons.length);
+  if (groups.length) {
+    const noOrder = groups.filter((x) => x.g.order === undefined);
+    if (noOrder.length) {
+      issues.push({
+        kind: "narrative-no-order",
+        severity: "info",
+        msg: `${noOrder.length} 个组未设叙事层级（${noOrder.map((x) => `「${x.g.name}」`).join("，").slice(0, 80)}），回放垫底——用 sketchpad order 修序`,
+        ids: [],
+      });
+    }
+    const totalElems = doc.strokes.length + texts.length + (doc.icons?.length ?? 0);
+    const big = groups
+      .map((x) => ({ g: x.g, n: x.m.strokes.length + x.m.texts.length + x.m.icons.length }))
+      .filter((x) => x.g.strokeIds.length > 12 && x.n > totalElems * 0.6)
+      .sort((a, b) => b.n - a.n)[0];
+    if (big) {
+      issues.push({
+        kind: "narrative-coarse",
+        severity: "warn",
+        msg: `叙事粒度过粗：组「${big.g.name}」吞掉了 ${big.m.strokes.length + big.m.texts.length + big.m.icons.length} 个元素（约占全部 ${Math.round((big.n / Math.max(totalElems, 1)) * 100)}%），回放一幕播完没有节奏——按结构批拆成多个组（如逐节点/逐分区）`,
+        ids: [],
+      });
+    }
+    const mixed = groups.filter((x) => (x.g.order ?? 0) >= 4 && x.m.strokes.length > 6);
+    if (mixed.length) {
+      issues.push({
+        kind: "narrative-mixed",
+        severity: "warn",
+        msg: `组（${mixed.map((x) => `「${x.g.name}」`).join("，").slice(0, 80)}）在标注层级（order≥4）却带着大量笔迹——像是结构混进了标注层，考虑拆组并把结构降到 order 3`,
+        ids: [],
+      });
+    }
   }
   return issues;
 }

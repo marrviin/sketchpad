@@ -1,7 +1,8 @@
 /**
  * sketchpad compose：场景级确定性构图。agent 给结构化场景描述（节点/连线/参与者/分区），
- * 这里算出布局并产出后端契约形状（[x,y] tuple），工具层直接 POST /draw——agent 不再手排坐标，
- * 一次调用得到对齐、间距、连线起止都正确的结构骨架，叙事质量由算法保证。
+ * 这里算出布局并产出后端契约形状（[x,y] tuple），按「幕」分批返回——每批一个语义组 + 叙事层级，
+ * 工具层逐批 POST /draw。回放时按幕推进：流程图沿图走（节点→入边→节点）、时序图按消息一幕一幕、
+ * 原型骨架按 设备框→分区 分层。叙事质量由算法保证，agent 不再手排坐标。
  * 布局抽象坐标下完成，最后统一缩放进首页画框（1040×620）。
  */
 import { STENCIL_ASPECT, type ShapeSpec } from "./contract.js";
@@ -13,6 +14,13 @@ const MARGIN = 44;
 
 /** 构图字号：相对画布宽 2% */
 const F = 21;
+
+/** 一幕 = 一次 draw 调用：一个语义组 + 叙事层级 + 该幕形状（批内顺序：结构 → 标注） */
+export interface ComposeBatch {
+  group: string;
+  order: number;
+  shapes: ShapeSpec[];
+}
 
 /* ===== 文本宽度估计：LXGW 文楷渲染近似（CJK ≈ 1em，latin ≈ 0.55em） ===== */
 
@@ -40,6 +48,17 @@ interface Box {
 }
 
 const LINE = { tool: "felt" as const, color: "ink" as const, size: 1 };
+
+/** 组名去重：同名组会被后端合并，破坏逐幕叙事——重复 label 追加 ·id */
+function uniqueName(base: string, id: string, used: Set<string>): string {
+  if (!used.has(base)) {
+    used.add(base);
+    return base;
+  }
+  const name = `${base}·${id}`;
+  used.add(name);
+  return name;
+}
 
 /* ===== 流程图 ===== */
 
@@ -88,20 +107,19 @@ export type ComposeInput =
   | ({ scene: "sequence" } & SequenceInput)
   | ({ scene: "wireframe" } & WireframeInput);
 
-function flowNodeSize(n: FlowNode): { w: number; h: number; r: number } {
-  const tw = estimateTextWidth(n.label, F);
-  if (n.kind === "decision") {
-    const r = Math.max(tw * 0.62 + F, F * 1.6, 72);
-    return { w: 2 * r, h: 2 * r, r };
-  }
-  const ih = n.icon ? 30 : 0;
-  return { w: Math.max(tw + 36, 104), h: F + 26 + ih, r: 0 };
-}
-
 /** 主方向盒边锚点（菱形外） */
 function boxAnchor(b: Box, dir: "tb" | "lr", forward: boolean, outward: boolean): Pt {
   const sign = (forward ? 1 : -1) * (outward ? 1 : -1);
   return dir === "tb" ? [b.cx, b.cy + sign * (b.h / 2)] : [b.cx + sign * (b.w / 2), b.cy];
+}
+
+/** 菱形边界：沿 target 中心方向的菱形交点（|x|/r + |y|/r = 1） */
+function diamondBoundary(d: Box, target: Box): Pt {
+  const dx = target.cx - d.cx;
+  const dy = target.cy - d.cy;
+  if (dx === 0 && dy === 0) return [d.cx, d.cy - d.r];
+  const t = 1 / (Math.abs(dx) / d.r + Math.abs(dy) / d.r);
+  return [d.cx + dx * t, d.cy + dy * t];
 }
 
 /** 带拐弯的三段正交折线（主方向传播，副方向对位） */
@@ -121,7 +139,7 @@ function arrowHead(at: Pt, fromDir: Pt, len = 9): ShapeSpec[] {
   }));
 }
 
-function flowLayout(input: FlowInput): ShapeSpec[] {
+function flowLayout(input: FlowInput, prefix: string, order: number): ComposeBatch[] {
   const dir = input.dir ?? "tb";
   const nodes = input.nodes;
   const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -130,9 +148,19 @@ function flowLayout(input: FlowInput): ShapeSpec[] {
       throw new Error(`edge 引用未知节点：${!byId.has(e.from) ? e.from : e.to}（nodes 里没有这个 id）`);
     }
   }
-  const sizeOf = new Map(nodes.map((n) => [n.id, flowNodeSize(n)]));
+  const sizeOf = new Map(
+    nodes.map((n) => {
+      const tw = estimateTextWidth(n.label, F);
+      if (n.kind === "decision") {
+        const r = Math.max(tw * 0.62 + F, F * 1.6, 72);
+        return [n.id, { w: 2 * r, h: 2 * r, r }] as const;
+      }
+      const ih = n.icon ? 30 : 0;
+      return [n.id, { w: Math.max(tw + 36, 104), h: F + 26 + ih, r: 0 }] as const;
+    }),
+  );
 
-  // 分层：从源头 BFS 最短路径（节点尽量靠近起点，回退边走侧路），层内保持输入顺序
+  // 分层 + 行走顺序：从源头 BFS 最短路径（节点尽量靠近起点），queue 顺序 = 叙事行走序
   const layer = new Map<string, number>();
   const queue = nodes.filter((n) => !input.edges.some((e) => e.to === n.id)).map((n) => n.id);
   for (const id of queue) layer.set(id, 0);
@@ -149,10 +177,7 @@ function flowLayout(input: FlowInput): ShapeSpec[] {
     }
   }
   for (const n of nodes) if (!layer.has(n.id)) layer.set(n.id, 0);
-  // 回退边会把节点推到更深层，中间可能留下空层——压实层号
-  const used = [...new Set([...layer.values()])].sort((a, b) => a - b);
-  const remap = new Map(used.map((v, i) => [v, i] as const));
-  for (const [id, v] of layer) layer.set(id, remap.get(v)!);
+
   const maxL = Math.max(...[...layer.values()], 0);
   const layers: string[][] = Array.from({ length: maxL + 1 }, () => []);
   for (const n of nodes) layers[layer.get(n.id)!].push(n.id);
@@ -203,50 +228,22 @@ function flowLayout(input: FlowInput): ShapeSpec[] {
   const font = Math.max(F * s, 11);
   const lblFont = Math.max(F * s * 0.8, 10);
 
-  // 出形状：节点 → 连线 → 标注（同批内绘制顺序 = 结构先于标注）
-  const out: ShapeSpec[] = [];
-  const labels: ShapeSpec[] = [];
-  const putLabel = (text: string, cx: number, cy: number, fs = font) => {
+  const putLabel = (into: ShapeSpec[], text: string, cx: number, cy: number, fs = font) => {
     const tw = estimateTextWidth(text, fs);
-    labels.push({ shape: "text", x: cx - tw / 2, y: cy - fs * 0.62, size: fs, color: "ink", text });
+    into.push({ shape: "text", x: cx - tw / 2, y: cy - fs * 0.62, size: fs, color: "ink", text });
   };
-  for (const n of nodes) {
-    const b = boxes.get(n.id)!;
-    if (n.kind === "decision") {
-      // 菱形：闭合四点 polyline（polygon 的 rotDeg 不被 sampler 支持，画出来是正方形）
-      out.push({
-        shape: "polyline",
-        points: [
-          [b.cx, b.cy - b.r],
-          [b.cx + b.r, b.cy],
-          [b.cx, b.cy + b.r],
-          [b.cx - b.r, b.cy],
-          [b.cx, b.cy - b.r],
-        ],
-        ...LINE,
-      });
-    } else if (n.kind === "start" || n.kind === "end") {
-      out.push({ shape: "ellipse", cx: b.cx, cy: b.cy, rx: b.w / 2, ry: b.h / 2, ...LINE });
-    } else {
-      out.push({ shape: "rrect", x: b.cx - b.w / 2, y: b.cy - b.h / 2, w: b.w, h: b.h, r: 7, ...LINE });
-    }
-    if (n.icon) {
-      const isz = Math.min(28 * s, b.h * 0.38);
-      out.push({ shape: "icon", name: n.icon, x: b.cx - isz / 2, y: b.cy - b.h / 2 + 4, size: isz, tool: LINE.tool, color: LINE.color });
-    }
-    const fs = n.kind === "decision" ? Math.min(font, b.r * 0.72) : font;
-    putLabel(n.label, b.cx, b.cy + (n.icon ? 6 : 0), fs);
-  }
-  for (const e of input.edges) {
+
+  /** 一条连线的形状 + 标注（目标节点的幕里先画入边再画节点） */
+  const edgeShapes = (e: FlowEdge): ShapeSpec[] => {
     const a = boxes.get(e.from)!;
     const b = boxes.get(e.to)!;
     const forward = dir === "tb" ? b.cy > a.cy + 1 : b.cx > a.cx + 1;
     const sameBand =
       dir === "tb" ? Math.abs(a.cy - b.cy) < (a.h + b.h) / 2 : Math.abs(a.cx - b.cx) < (a.w + b.w) / 2;
     const dashed = e.dashed || !forward;
+    const out: ShapeSpec[] = [];
     let path: Pt[];
     if (sameBand) {
-      // 同层：沿排布方向直连相邻边
       const ahead = dir === "tb" ? a.cx <= b.cx : a.cy <= b.cy;
       const L = ahead ? a : b;
       const R = ahead ? b : a;
@@ -254,7 +251,6 @@ function flowLayout(input: FlowInput): ShapeSpec[] {
       const p1: Pt = dir === "tb" ? [R.cx - (R.r || R.w / 2), R.cy] : [R.cx, R.cy - (R.r || R.h / 2)];
       path = [p0, p1];
     } else if (!forward) {
-      // 回退边：从源侧边绕到目标侧边（tb 绕右侧 / lr 绕下方），避免压在主干上
       if (dir === "tb") {
         const x0 = a.cx + (a.r || a.w / 2);
         const x1 = b.cx + (b.r || b.w / 2);
@@ -284,32 +280,62 @@ function flowLayout(input: FlowInput): ShapeSpec[] {
     }
     if (e.label) {
       if (path.length === 2) {
-        putLabel(e.label, (path[0][0] + path[1][0]) / 2, (path[0][1] + path[1][1]) / 2 - lblFont * 0.7, lblFont);
+        putLabel(out, e.label, (path[0][0] + path[1][0]) / 2, (path[0][1] + path[1][1]) / 2 - lblFont * 0.7, lblFont);
       } else {
-        // 折线取中段：tb 中段竖直（标右侧），lr 中段水平（标上方）
         const [m1, m2] = [path[1], path[2]];
-        if (dir === "tb") putLabel(e.label, m1[0] + lblFont * 0.6, (m1[1] + m2[1]) / 2, lblFont);
-        else putLabel(e.label, (m1[0] + m2[0]) / 2, m1[1] - lblFont * 0.7, lblFont);
+        if (dir === "tb") putLabel(out, e.label, m1[0] + lblFont * 0.6, (m1[1] + m2[1]) / 2, lblFont);
+        else putLabel(out, e.label, (m1[0] + m2[0]) / 2, m1[1] - lblFont * 0.7, lblFont);
       }
     }
+    return out;
+  };
+
+  // 出幕：标题（order 1）→ 沿图行走逐节点一幕（入边先画，节点后画，文字最后）
+  const used = new Set<string>();
+  const batches: ComposeBatch[] = [];
+  if (input.title) {
+    const shapes: ShapeSpec[] = [];
+    putLabel(shapes, input.title, FRAME_W / 2, MARGIN * 0.7 + F * 1.1, font * 1.15);
+    batches.push({ group: uniqueName(`${prefix}·标题`, "title", used), order: 1, shapes });
   }
-  if (input.title) putLabel(input.title, FRAME_W / 2, MARGIN * 0.7 + F * 1.1, font * 1.15);
-  out.push(...labels);
-  return out;
+  for (const id of queue) {
+    const n = byId.get(id)!;
+    const b = boxes.get(id)!;
+    const shapes: ShapeSpec[] = [];
+    for (const e of input.edges) {
+      if (e.to === id) shapes.push(...edgeShapes(e));
+    }
+    if (n.kind === "decision") {
+      shapes.push({
+        shape: "polyline",
+        points: [
+          [b.cx, b.cy - b.r],
+          [b.cx + b.r, b.cy],
+          [b.cx, b.cy + b.r],
+          [b.cx - b.r, b.cy],
+          [b.cx, b.cy - b.r],
+        ],
+        ...LINE,
+      });
+    } else if (n.kind === "start" || n.kind === "end") {
+      shapes.push({ shape: "ellipse", cx: b.cx, cy: b.cy, rx: b.w / 2, ry: b.h / 2, ...LINE });
+    } else {
+      shapes.push({ shape: "rrect", x: b.cx - b.w / 2, y: b.cy - b.h / 2, w: b.w, h: b.h, r: 7, ...LINE });
+    }
+    if (n.icon) {
+      const isz = Math.min(28 * s, b.h * 0.38);
+      shapes.push({ shape: "icon", name: n.icon, x: b.cx - isz / 2, y: b.cy - b.h / 2 + 4, size: isz, tool: LINE.tool, color: LINE.color });
+    }
+    const fs = n.kind === "decision" ? Math.min(font, b.r * 0.72) : font;
+    putLabel(shapes, n.label, b.cx, b.cy + (n.icon ? 6 : 0), fs);
+    batches.push({ group: uniqueName(n.label, n.id, used), order, shapes });
+  }
+  return batches;
 }
 
-/** 菱形边界：沿 target 中心方向的菱形交点（|x|/r + |y|/r = 1） */
-function diamondBoundary(d: Box, target: Box): Pt {
-  const dx = target.cx - d.cx;
-  const dy = target.cy - d.cy;
-  if (dx === 0 && dy === 0) return [d.cx, d.cy - d.r];
-  const t = 1 / (Math.abs(dx) / d.r + Math.abs(dy) / d.r);
-  return [d.cx + dx * t, d.cy + dy * t];
-}
-
-function sequenceLayout(input: SequenceInput): ShapeSpec[] {
-  const out: ShapeSpec[] = [];
-  const labels: ShapeSpec[] = [];
+function sequenceLayout(input: SequenceInput, prefix: string, order: number): ComposeBatch[] {
+  const batches: ComposeBatch[] = [];
+  const used = new Set<string>();
   const parts = input.participants;
   const byId = new Map(parts.map((p) => [p.id, p]));
   for (const m of input.messages) {
@@ -326,11 +352,30 @@ function sequenceLayout(input: SequenceInput): ShapeSpec[] {
   const rowY = (i: number) => headY + headH + 30 + rowGap * (i + 1);
   const cxOf = new Map(parts.map((p, i) => [p.id, MARGIN + colW * (i + 0.5)] as const));
 
+  // ① 标题
+  if (input.title) {
+    batches.push({
+      group: uniqueName(`${prefix}·标题`, "title", used),
+      order: 1,
+      shapes: [
+        {
+          shape: "text",
+          x: (FRAME_W - estimateTextWidth(input.title, F * 1.15)) / 2,
+          y: MARGIN * 0.7,
+          size: F * 1.15,
+          color: "ink",
+          text: input.title,
+        },
+      ],
+    });
+  }
+  // ② 参与者 + 生命线（骨架）
+  const head: ShapeSpec[] = [];
   for (const p of parts) {
     const w = Math.min(colW - 18, Math.max(estimateTextWidth(p.label, F) + 20, 64));
     const cx = cxOf.get(p.id)!;
-    out.push({ shape: "rrect", x: cx - w / 2, y: headY, w, h: headH, r: 6, ...LINE });
-    labels.push({
+    head.push({ shape: "rrect", x: cx - w / 2, y: headY, w, h: headH, r: 6, ...LINE });
+    head.push({
       shape: "text",
       x: cx - estimateTextWidth(p.label, F) / 2,
       y: headY + headH / 2 - F * 0.62,
@@ -342,62 +387,57 @@ function sequenceLayout(input: SequenceInput): ShapeSpec[] {
   const lastY = rowY(Math.max(input.messages.length - 1, 0));
   for (const p of parts) {
     const cx = cxOf.get(p.id)!;
-    out.push({ shape: "dash", from: [cx, headY + headH + 4], to: [cx, lastY + 22], ...LINE });
+    head.push({ shape: "dash", from: [cx, headY + headH + 4], to: [cx, lastY + 22], ...LINE });
   }
+  batches.push({ group: uniqueName(`${prefix}·参与者`, "participants", used), order: 2, shapes: head });
+  // ③ 每条消息一幕（按发生顺序）
   input.messages.forEach((m, i) => {
     const y = rowY(i);
     const x0 = cxOf.get(m.from)!;
     const x1 = cxOf.get(m.to)!;
+    const shapes: ShapeSpec[] = [];
     if (m.from === m.to) {
       const pts: Pt[] = [[x0, y], [x0 + 16, y], [x0 + 16, y + 18], [x0 + 2, y + 18]];
-      out.push({ shape: "polyline", points: pts, ...LINE });
-      out.push(...arrowHead([x0 + 2, y + 18], pts[pts.length - 2], 7));
+      shapes.push({ shape: "polyline", points: pts, ...LINE });
+      shapes.push(...arrowHead([x0 + 2, y + 18], pts[pts.length - 2], 7));
       if (m.label) {
-        labels.push({
+        shapes.push({ shape: "text", x: x0 + 22, y: y + 22, size: F * 0.85, color: "ink", text: m.label });
+      }
+    } else if (m.kind === "dashed") {
+      shapes.push({ shape: "dash", from: [x0, y], to: [x1, y], ...LINE });
+      shapes.push(...arrowHead([x1, y], [x0, y], 9));
+      if (m.label) {
+        shapes.push({
           shape: "text",
-          x: x0 + 22,
-          y: y + 22,
+          x: (x0 + x1) / 2 - estimateTextWidth(m.label, F * 0.85) / 2,
+          y: y - F * 1.15,
           size: F * 0.85,
           color: "ink",
           text: m.label,
         });
       }
-      return;
-    }
-    if (m.kind === "dashed") {
-      out.push({ shape: "dash", from: [x0, y], to: [x1, y], ...LINE });
-      out.push(...arrowHead([x1, y], [x0, y], 9));
     } else {
-      out.push({ shape: "arrow", from: [x0, y], to: [x1, y], ...LINE });
+      shapes.push({ shape: "arrow", from: [x0, y], to: [x1, y], ...LINE });
+      if (m.label) {
+        shapes.push({
+          shape: "text",
+          x: (x0 + x1) / 2 - estimateTextWidth(m.label, F * 0.85) / 2,
+          y: y - F * 1.15,
+          size: F * 0.85,
+          color: "ink",
+          text: m.label,
+        });
+      }
     }
-    if (m.label) {
-      labels.push({
-        shape: "text",
-        x: (x0 + x1) / 2 - estimateTextWidth(m.label, F * 0.85) / 2,
-        y: y - F * 1.15,
-        size: F * 0.85,
-        color: "ink",
-        text: m.label,
-      });
-    }
+    const name = m.label ?? `${byId.get(m.from)!.label}→${byId.get(m.to)!.label}`;
+    batches.push({ group: uniqueName(`${prefix}·${name}`, `${i}`, used), order, shapes });
   });
-  if (input.title) {
-    labels.push({
-      shape: "text",
-      x: (FRAME_W - estimateTextWidth(input.title, F * 1.15)) / 2,
-      y: MARGIN * 0.7,
-      size: F * 1.15,
-      color: "ink",
-      text: input.title,
-    });
-  }
-  out.push(...labels);
-  return out;
+  return batches;
 }
 
-function wireframeLayout(input: WireframeInput): ShapeSpec[] {
-  const out: ShapeSpec[] = [];
-  const labels: ShapeSpec[] = [];
+function wireframeLayout(input: WireframeInput, prefix: string, order: number): ComposeBatch[] {
+  const batches: ComposeBatch[] = [];
+  const used = new Set<string>();
   let fw: number;
   let fh: number;
   if (input.frame === "phone") {
@@ -409,26 +449,18 @@ function wireframeLayout(input: WireframeInput): ShapeSpec[] {
   }
   const fx = (FRAME_W - fw) / 2;
   const fy = MARGIN;
-  out.push({ shape: "stencil", kind: input.frame, x: fx, y: fy, w: fw, h: fh, ...LINE });
-  // 内容区：扣掉 browser 标题栏 / phone 刘海
   const inset = input.frame === "browser" ? fh * 0.16 : fh * 0.06;
   const ix = fx + fw * 0.045;
   const iw = fw - fw * 0.09;
   const iy = fy + inset;
   const ih = fh - inset - fh * 0.045;
   const font = F * 0.85;
-  for (const r of input.regions) {
-    const x = ix + r.x * iw;
-    const y = iy + r.y * ih;
-    const w = r.w * iw;
-    const h = r.h * ih;
-    out.push({ shape: "rrect", x, y, w, h, r: 5, ...LINE });
-    if (r.label) {
-      labels.push({ shape: "text", x: x + 8, y: y + 7, size: font, color: "ink", text: r.label });
-    }
-  }
+  // ① 标题 + 设备框（order 1）
+  const frameShapes: ShapeSpec[] = [
+    { shape: "stencil", kind: input.frame, x: fx, y: fy, w: fw, h: fh, ...LINE },
+  ];
   if (input.title) {
-    labels.push({
+    frameShapes.push({
       shape: "text",
       x: (FRAME_W - estimateTextWidth(input.title, font * 1.2)) / 2,
       y: MARGIN * 0.55,
@@ -437,18 +469,34 @@ function wireframeLayout(input: WireframeInput): ShapeSpec[] {
       text: input.title,
     });
   }
-  out.push(...labels);
-  return out;
+  batches.push({ group: uniqueName(`${prefix}·${input.frame === "phone" ? "手机框" : "浏览器框"}`, "frame", used), order: 1, shapes: frameShapes });
+  // ② 每个分区一幕（order 2 = 骨架分区；order 参数显式给则用参数）
+  input.regions.forEach((r, i) => {
+    const x = ix + r.x * iw;
+    const y = iy + r.y * ih;
+    const w = r.w * iw;
+    const h = r.h * ih;
+    const shapes: ShapeSpec[] = [{ shape: "rrect", x, y, w, h, r: 5, ...LINE }];
+    if (r.label) {
+      shapes.push({ shape: "text", x: x + 8, y: y + 7, size: font, color: "ink", text: r.label });
+    }
+    batches.push({
+      group: uniqueName(r.label ?? `${prefix}·分区${i + 1}`, `${i}`, used),
+      order,
+      shapes,
+    });
+  });
+  return batches;
 }
 
-/** 场景 → 后端契约形状（同批内顺序：结构 → 标注） */
-export function composeShapes(input: ComposeInput): ShapeSpec[] {
+/** 场景 → 叙事批次（每批一次 draw 调用；批序 = 回放序） */
+export function composeBatches(input: ComposeInput, prefix: string, order: number): ComposeBatch[] {
   switch (input.scene) {
     case "flow":
-      return flowLayout(input);
+      return flowLayout(input, prefix, order);
     case "sequence":
-      return sequenceLayout(input);
+      return sequenceLayout(input, prefix, order);
     case "wireframe":
-      return wireframeLayout(input);
+      return wireframeLayout(input, prefix, order);
   }
 }
