@@ -4,10 +4,31 @@
 
 sketchpad 是一块 looseleaf 手绘板：手绘风页面（笔刷质感、颗粒、压力）、REST/SSE 后端和一套 CLI / 工具接口。AI agent 经 CLI 或工具调用在画板上画架构图、流程图、原型草图和手绘 icon，**每一笔秒级出现在你的浏览器里**；页面是纯查看器——拖拽平移、滚轮缩放、切换画布、叙事回放，作画全部交给 agent。
 
+**推荐：安装为 agent 技能**（一键装上「会画手绘板」的完整工作流——画 → 自查 → 修正循环、网格定位、叙事层级、质量基线）：
+
+```bash
+npx skills add marrviin/sketchpad
+```
+
+装好后 agent 直接知道怎么用 sketchpad；再装 CLI 本体即可开箱即画：
+
 ```bash
 npm i -g @content-forge/sketchpad
 sketchpad ui    # 打开（或拉起）画板服务并打印页面地址
 ```
+
+也可以只装 CLI 手动使用：
+
+```bash
+npm i -g @content-forge/sketchpad
+sketchpad ui    # 打开（或拉起）画板服务并打印页面地址
+```
+
+## 效果演示
+
+| 多屏原型动线（叙事回放） | 流程图（compose 场景构图） |
+|---|---|
+| <video src="docs/demo-wireframe.mp4" controls muted loop></video> | <video src="docs/demo-flow.mp4" controls muted loop></video> |
 
 ## 它擅长画什么
 
@@ -54,7 +75,7 @@ sketchpad snapshot        # 渲染 PNG 给 agent 自查
 sketchpad undo            # 画错了撤销重来
 ```
 
-**作为 agent 技能使用**：`packages/cli/skill/SKILL.md` 是完整的创作工作流 skill（画 → 自查 → 修正循环、网格定位、叙事层级、质量基线），复制到 `~/.claude/skills/sketchpad/` 即可让 Claude Code 装上「会画手绘板」的能力。
+**作为 agent 技能使用**：[`packages/cli/skill/SKILL.md`](packages/cli/skill/SKILL.md) 是完整的创作工作流 skill（画 → 自查 → 修正循环、网格定位、叙事层级、质量基线）。推荐用 `npx skills add marrviin/sketchpad` 一键安装；也可手动复制到 `~/.claude/skills/sketchpad/`，让 Claude Code 装上「会画手绘板」的能力。
 
 **daemon 集成**：装了 [`@content-forge/daemon`](https://www.npmjs.com/package/@content-forge/daemon) 时自动注册进守护进程，画板挂在 `/project/<项目名>/sketchpad/`，与统一前端生态共用路由；没有 daemon 就起本地常驻服务，开箱即用。
 
