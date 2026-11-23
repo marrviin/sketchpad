@@ -1,8 +1,8 @@
 # sketchpad
 
-手绘板：looseleaf Sketchpad 画板 —— 手绘风页面（笔刷质感/颗粒/压力）+ REST/SSE 后端 + CLI，agent 与人在同一画布双向同步作画。
+手绘板：looseleaf Sketchpad 画板 —— 手绘风页面（笔刷质感/颗粒/压力）+ REST/SSE 后端 + CLI，agent 作画、人实时观看。
 
-- **人在页面画/擦/撤销**会回流后端；**agent 的每一笔**（CLI / API 带 canvas id 作画）经 SSE 秒级出现在页面
+- **页面是纯查看器**：拖拽平移、滚轮缩放、切换画布、叙事回放；作画全部经 CLI / API（带 canvas id）由 agent 完成，每一笔经 SSE 秒级出现在页面
 - 多画布隔离：并发 agent 各绑一块画布，rev/撤销栈/笔迹互不影响；数据落盘 `<项目根>/.content-forge/sketchpad/<id>.json`
 - `snapshot` 渲染 PNG 给 agent 自查（画 → 自查 → 修正回路）
 - 叙事回放：agent 作画带 `group` + `order`（1 画布 → 2 骨架 → 3 主内容 → 4 次级 → 5 标注），页面 `?c=<id>&replay=1` 按叙事层级逐组铺开，像讲产品而不是乱画

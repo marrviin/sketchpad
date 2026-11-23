@@ -22,7 +22,7 @@ const program = new Command();
 
 program
   .name("sketchpad")
-  .description("手绘板：looseleaf Sketchpad 画板（agent 经 CLI 作画，页面双向同步）");
+  .description("手绘板：looseleaf Sketchpad 画板（agent 经 CLI 作画，页面实时观看）");
 
 const NAMED_TOOLS = [
   ["state", "get_state"],
