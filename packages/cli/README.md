@@ -39,11 +39,11 @@ sketchpad tool <名> [json]  # 通用入口（工具名可省略 sketchpad_ 前�
 
 ```bash
 pnpm install
-pnpm build        # tsc（服务端 dist/）+ vite（前端 web/dist/）
+pnpm build        # pnpm monorepo：vite（前端 → packages/cli/web-dist/）+ tsc（服务端 packages/cli/dist/）
 pnpm dev:web      # 前端 dev server（API 代理到本地 serve）
 pnpm typecheck
 ```
 
-结构：`src/`（后端：CanvasStore + REST/SSE + snapshot 渲染器 + CLI）、`web/`（React 前端，looseleaf ink 管线来自 `@content-forge/ink`）、`fonts/`（霞鹜文楷 Lite，OFL）、`skill/`。
+结构：pnpm monorepo，`packages/cli/`（后端：CanvasStore + REST/SSE + snapshot 渲染器 + CLI，fonts/ 为霞鹜文楷 Lite OFL 字体，skill/ 为 agent 技能）、`packages/web/`（React 前端，looseleaf ink 管线来自 `@content-forge/ink`；构建产物直接写入 `packages/cli/web-dist/` 随包发布）。
 
 License: MIT（字体各自遵循其 OFL 许可）

@@ -131,9 +131,9 @@ program
     console.log("  agent 作画：用 sketchpad tool / draw 直接调");
   });
 
-/* 全功能服务的静态目录（web/dist）；缺目录时给清晰的报错 */
+/* 全功能服务的静态目录（web-dist，vite 构建产物落在 cli 包内）；缺目录时给清晰的报错 */
 function staticDir(): string {
-  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web", "dist");
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web-dist");
   if (!fs.existsSync(path.join(dir, "index.html"))) {
     throw new Error(`前端构建产物缺失（${dir}）：先运行 pnpm build`);
   }

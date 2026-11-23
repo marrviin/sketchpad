@@ -14,7 +14,7 @@ export default defineConfig({
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
   build: {
-    outDir: fileURLToPath(new URL("./dist", import.meta.url)),
+    outDir: fileURLToPath(new URL("../cli/web-dist", import.meta.url)),
     emptyOutDir: true,
   },
   server: {

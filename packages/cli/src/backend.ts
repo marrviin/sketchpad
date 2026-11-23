@@ -106,7 +106,7 @@ function sameContent(a: CanvasContent, b: CanvasContent): boolean {
 export interface BackendOptions {
   /** 端口（缺省 0 = 临时端口） */
   port?: number;
-  /** 前端构建产物目录（web/dist）；给定时非 /api 路径按 SPA 静态服务（缺省纯 API，供旧网关 spawn） */
+  /** 前端构建产物目录（web-dist）；给定时非 /api 路径按 SPA 静态服务（缺省纯 API，供旧网关 spawn） */
   staticDir?: string;
 }
 

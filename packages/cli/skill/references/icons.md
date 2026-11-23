@@ -14,7 +14,7 @@
 - `size` = 边长 px；`x/y` = **盒子左上角**；`color` 套色。
 - **glyph 自动按 bbox 中心对齐盒中心**——looseleaf glyph 不满铺（各 icon bbox 不同），渲染端已按 glyph 实测中心定位，调用方只管把盒子放对。
 - icon 是独立元素（非笔迹），进 undo/redo，可被语义分组 `group` 绑定、按 id/组名擦除。
-- 查全部名字：`python3 -c "import json; print(list(json.load(open('packages/sketchpad/src/icon-bundle.json'))['icons'].keys()))"`
+- 查全部名字：`python3 -c "import json; print(list(json.load(open('packages/cli/src/icon-bundle.json'))['icons'].keys()))"`
 
 ### 定位公式：盒中心 = 所在区域的中心线
 

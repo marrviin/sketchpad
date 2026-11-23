@@ -148,7 +148,7 @@ sketchpad order '{"canvas":"<id>","orders":{"标注":5,"主流程":3}}'         
 **icon 形状**（UI 图标一律用它，别用 line/polyline 手画——造型必错、质感必硬）：
 `chevron-left/right`·`arrow-*`·`rotate-cw`·`lock`·`search`·`star`·`ellipsis-vertical`·`home`·`user`·`mail`…共 160 个。
 `x/y` 是盒子左上角，glyph 自动按实测 bbox 中心对齐盒中心。**定位公式：y = 区域中心线 − size/2**（工具栏中心 98 → size=24 时 y=86）；同一条中心线上不同 size 的图标各自反推 y。
-查全部名字：`python3 -c "import json; print(list(json.load(open('packages/sketchpad/src/icon-bundle.json'))['icons'].keys()))"`。详见 [references/icons.md](references/icons.md)。
+查全部名字：`python3 -c "import json; print(list(json.load(open('packages/cli/src/icon-bundle.json'))['icons'].keys()))"`。详见 [references/icons.md](references/icons.md)。
 
 每个形状可覆盖 `tool`/`color`/`size`（text 只有 color）；批级默认由 draw 顶层参数给。点/线端点必须 `{x,y}` 对象（部分 LLM 网关拒绝 tuple）。
 
@@ -181,7 +181,7 @@ sketchpad ui    # 确保统一前端在线并打印画板页面地址
 ```
 
 - 页面受控同步：SSE rev 去抖 + PUT 回流。直连旧入口页面会降级纯本地模式——确认走 `sketchpad ui`。
-- 文字用霞鹜文楷 Lite（OFL，字体文件在 `packages/web/src/apps/sketchpad/fonts/`）：页面 @font-face 与 snapshot 渲染共用同一 TTF，两端一致。
+- 文字用霞鹜文楷 Lite（OFL，字体文件在 `packages/cli/fonts/`）：页面 @font-face 与 snapshot 渲染共用同一 TTF，两端一致。
 - 后端长驻：改了 sketchpad 包源码后 `pkill -f canvas-backend` 让网关重拉；改了前端组件要 `pnpm --filter @content-forge/web build`。
 
 ## 常见问题

@@ -5,10 +5,10 @@
 @import "./looseleaf.css";
 
 /* 手写风文本标注字体（霞鹜文楷 Lite，OFL）：画板 texts 元素渲染用，
-   与 sketchpad snapshot 渲染器（src/render.ts）共用包根 fonts/ 下同一 TTF，两端一致 */
+   与 sketchpad snapshot 渲染器（packages/cli/src/render.ts）共用 packages/cli/fonts/ 下同一 TTF，两端一致 */
 @font-face {
   font-family: "LXGW WenKai Lite";
-  src: url("../../fonts/LXGWWenKaiLite-Regular.ttf") format("truetype");
+  src: url("../../cli/fonts/LXGWWenKaiLite-Regular.ttf") format("truetype");
   font-display: swap;
 }
 

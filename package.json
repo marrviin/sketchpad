@@ -1,70 +1,15 @@
 {
-  "name": "@content-forge/sketchpad",
-  "version": "0.1.0",
-  "description": "手绘板：looseleaf Sketchpad 画板（手绘风页面 + REST/SSE 后端 + CLI），agent 与人双向同步作画",
-  "license": "MIT",
-  "type": "module",
-  "bin": {
-    "sketchpad": "./bin/sketchpad.js"
+  "name": "sketchpad-workspace",
+  "private": true,
+  "scripts": {
+    "build": "pnpm --filter @content-forge/sketchpad-web build && pnpm --filter @content-forge/sketchpad build",
+    "build:server": "pnpm --filter @content-forge/sketchpad build",
+    "build:web": "pnpm --filter @content-forge/sketchpad-web build",
+    "dev:web": "pnpm --filter @content-forge/sketchpad-web dev",
+    "typecheck": "pnpm -r typecheck",
+    "ui": "pnpm --filter @content-forge/sketchpad ui"
   },
-  "files": [
-    "bin/",
-    "dist/",
-    "web/dist/",
-    "fonts/",
-    "skill/",
-    "README.md"
-  ],
   "engines": {
     "node": ">=20"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@resvg/resvg-js",
-      "esbuild",
-      "@tailwindcss/oxide"
-    ]
-  },
-  "scripts": {
-    "build": "pnpm build:server && pnpm build:web",
-    "build:server": "tsc -p tsconfig.build.json",
-    "build:web": "vite build --config web/vite.config.ts",
-    "dev:web": "vite dev --config web/vite.config.ts",
-    "typecheck": "tsc --noEmit",
-    "ui": "node bin/sketchpad.js ui"
-  },
-  "dependencies": {
-    "@resvg/resvg-js": "^2.6.2",
-    "commander": "^14.0.0",
-    "zod": "^3.25.76"
-  },
-  "peerDependencies": {
-    "@content-forge/daemon": ">=0.1.0"
-  },
-  "peerDependenciesMeta": {
-    "@content-forge/daemon": {
-      "optional": true
-    }
-  },
-  "devDependencies": {
-    "@content-forge/daemon": "^0.1.0",
-    "@content-forge/ink": "^0.1.0",
-    "@tailwindcss/vite": "^4.3.3",
-    "@types/node": "^24.19.2",
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.2",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "radix-ui": "^1.8.1",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1",
-    "react-router-dom": "^7.18.5",
-    "tailwind-merge": "^3.7.0",
-    "tailwindcss": "^4.3.3",
-    "tsx": "^4.20.3",
-    "typescript": "^5.9.3",
-    "vite": "^8.3.5",
-    "tw-animate-css": "^1.4.0"
   }
 }

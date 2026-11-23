@@ -1,0 +1,44 @@
+{
+  "name": "@content-forge/sketchpad",
+  "version": "0.1.0",
+  "description": "手绘板：looseleaf Sketchpad 画板（手绘风页面 + REST/SSE 后端 + CLI），agent 与人双向同步作画",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "sketchpad": "./bin/sketchpad.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "web-dist/",
+    "fonts/",
+    "skill/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "ui": "node bin/sketchpad.js ui"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "commander": "^14.0.0",
+    "zod": "^3.25.76"
+  },
+  "peerDependencies": {
+    "@content-forge/daemon": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@content-forge/daemon": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@content-forge/daemon": "^0.1.0",
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3"
+  }
+}

@@ -41,7 +41,7 @@ import { cn } from "@/lib/utils"
 
 type StrokeInput = Omit<SketchStroke, "id"> & { id?: string }
 
-/** 手写风文本标注（agent-only；镜像 packages/sketchpad/src/contract.ts 的 SketchText，两侧需同步） */
+/** 手写风文本标注（agent-only；镜像 packages/cli/src/contract.ts 的 SketchText，两侧需同步） */
 interface SketchText {
   id: string
   x: number
@@ -967,9 +967,8 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
     let t = 0.2
     let prevKey: number | undefined
     const seq =
-      ctx.groups.length
-        ? replayRevealOrder(ctx.strokes, ctx.texts, ctx.icons, ctx.groups)
-        : ctx.strokes.map((_, i) => ({ kind: "stroke" as const, index: i, orderKey: Infinity }))
+      replayRevealOrder(ctx.strokes, ctx.texts, ctx.icons, ctx.groups) ??
+      ctx.strokes.map((_, i) => ({ kind: "stroke" as const, index: i, orderKey: Infinity }))
     for (const item of seq) {
       if (prevKey !== undefined && item.orderKey !== prevKey) t += GROUP_GAP
       if (item.kind === "stroke") {
