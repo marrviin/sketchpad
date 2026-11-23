@@ -244,7 +244,7 @@ export function lintDoc(doc: {
       issues.push({
         kind: "narrative-coarse",
         severity: "warn",
-        msg: `叙事粒度过粗：组「${big.g.name}」吞掉了 ${big.m.strokes.length + big.m.texts.length + big.m.icons.length} 个元素（约占全部 ${Math.round((big.n / Math.max(totalElems, 1)) * 100)}%），回放一幕播完没有节奏——按结构批拆成多个组（如逐节点/逐分区）`,
+        msg: `叙事粒度过粗：组「${big.g.name}」吞掉了 ${big.n} 个元素（约占全部 ${Math.round((big.n / Math.max(totalElems, 1)) * 100)}%），回放一幕播完没有节奏——按结构批拆成多个组（如逐节点/逐分区）`,
         ids: [],
       });
     }
