@@ -193,34 +193,61 @@ function flowLayout(input: FlowInput, prefix: string, order: number): ComposeBat
   const layers: string[][] = Array.from({ length: maxL + 1 }, () => []);
   for (const n of nodes) layers[layer.get(n.id)!].push(n.id);
 
-  // 抽象坐标：主轴 = 层推进方向，副轴 = 层内排布
-  const gapMain = 74;
+  // 抽象坐标。tb：蛇形换行——长链按每行 4 层拆行、奇数行反序（读起来像 S 形），
+  // 行间由竖直边衔接；lr：主轴 = 层横向推进，层内纵向堆叠
+  const gapMain = 84;
   const gapCross = 58;
-  const rowSpans = layers.map(
-    (L) => L.reduce((s, id) => s + sizeOf.get(id)!.w, 0) + gapCross * Math.max(L.length - 1, 0),
-  );
-  const rowHeights = layers.map((L) => Math.max(...L.map((id) => sizeOf.get(id)!.h)));
-  const totalMain = rowHeights.reduce((s, h) => s + h, 0) + gapMain * Math.max(layers.length - 1, 0);
-  const totalCross = Math.max(...rowSpans, 0);
-
+  const PER_ROW = 4;
+  const isTb = dir === "tb";
   const boxes = new Map<string, Box>();
-  let mainOff = 0;
-  layers.forEach((L, li) => {
-    let cross = (totalCross - rowSpans[li]) / 2;
-    for (const id of L) {
-      const s = sizeOf.get(id)!;
-      const centerCross = cross + s.w / 2;
-      const centerMain = mainOff + s.h / 2;
-      boxes.set(
-        id,
-        dir === "tb"
-          ? { cx: centerCross, cy: centerMain, w: s.w, h: s.h, r: s.r }
-          : { cx: centerMain, cy: centerCross, w: s.w, h: s.h, r: s.r },
-      );
-      cross += s.w + gapCross;
+  let totalMain: number;
+  let totalCross: number;
+  if (isTb) {
+    const rowCount = Math.max(1, Math.ceil(layers.length / PER_ROW));
+    const perRow = Math.ceil(layers.length / rowCount);
+    const rows: string[][][] = [];
+    for (let r = 0; r < rowCount; r++) {
+      const ls = layers.slice(r * perRow, (r + 1) * perRow);
+      rows.push(r % 2 === 1 ? [...ls].reverse() : ls);
     }
-    mainOff += rowHeights[li] + gapMain;
-  });
+    const rowHeights = rows.map((ls) => Math.max(...ls.flat().map((id) => sizeOf.get(id)!.h)));
+    const rowSpans = rows.map((ls) => {
+      const n = ls.reduce((c, L) => c + L.length, 0);
+      return ls.reduce((s, L) => s + L.reduce((s2, id) => s2 + sizeOf.get(id)!.w, 0), 0) + gapCross * Math.max(n - 1, 0);
+    });
+    totalMain = rowHeights.reduce((s, h) => s + h, 0) + gapMain * Math.max(rows.length - 1, 0);
+    totalCross = Math.max(...rowSpans, 0);
+    let mainOff = 0;
+    rows.forEach((ls, r) => {
+      let cross = (totalCross - rowSpans[r]) / 2;
+      const rowCy = mainOff + rowHeights[r] / 2;
+      for (const L of ls) {
+        for (const id of L) {
+          const z = sizeOf.get(id)!;
+          boxes.set(id, { cx: cross + z.w / 2, cy: rowCy, w: z.w, h: z.h, r: z.r });
+          cross += z.w + gapCross;
+        }
+      }
+      mainOff += rowHeights[r] + gapMain;
+    });
+  } else {
+    const layerWs = layers.map((L) => Math.max(...L.map((id) => sizeOf.get(id)!.w)));
+    const layerHs = layers.map(
+      (L) => L.reduce((s, id) => s + sizeOf.get(id)!.h, 0) + gapCross * Math.max(L.length - 1, 0),
+    );
+    totalMain = layerWs.reduce((s, w) => s + w, 0) + gapMain * Math.max(layers.length - 1, 0);
+    totalCross = Math.max(...layerHs, 0);
+    let mainOff = 0;
+    layers.forEach((L, li) => {
+      let cross = (totalCross - layerHs[li]) / 2;
+      for (const id of L) {
+        const z = sizeOf.get(id)!;
+        boxes.set(id, { cx: mainOff + z.w / 2, cy: cross + z.h / 2, w: z.w, h: z.h, r: z.r });
+        cross += z.h + gapCross;
+      }
+      mainOff += layerWs[li] + gapMain;
+    });
+  }
 
   // 统一缩放进首页框
   const titleH = input.title ? F * 2.2 : 0;
@@ -244,40 +271,68 @@ function flowLayout(input: FlowInput, prefix: string, order: number): ComposeBat
     into.push({ shape: "text", x: cx - tw / 2, y: cy - fs * 0.62, size: fs, color: "ink", text });
   };
 
-  /** 一条连线的形状 + 标注（目标节点的幕里先画入边再画节点） */
+  /** 一条连线的形状 + 标注（目标节点的幕里先画入边再画节点）。
+   *  tb 用几何路由（蛇形多行后「前后」不再是全局方向）：同行直连 / 回退边绕行下方 /
+   *  跨行同列竖直 / 跨行异列 L 形；lr 沿层推进方向锚定。 */
   const edgeShapes = (e: FlowEdge): ShapeSpec[] => {
     const a = boxes.get(e.from)!;
     const b = boxes.get(e.to)!;
-    const forward = dir === "tb" ? b.cy > a.cy + 1 : b.cx > a.cx + 1;
-    const sameBand =
-      dir === "tb" ? Math.abs(a.cy - b.cy) < (a.h + b.h) / 2 : Math.abs(a.cx - b.cx) < (a.w + b.w) / 2;
-    const dashed = e.dashed || !forward;
+    const dashed = e.dashed;
     const out: ShapeSpec[] = [];
     let path: Pt[];
-    if (sameBand) {
-      const ahead = dir === "tb" ? a.cx <= b.cx : a.cy <= b.cy;
-      const L = ahead ? a : b;
-      const R = ahead ? b : a;
-      const p0: Pt = dir === "tb" ? [L.cx + (L.r || L.w / 2), L.cy] : [L.cx, L.cy + (L.r || L.h / 2)];
-      const p1: Pt = dir === "tb" ? [R.cx - (R.r || R.w / 2), R.cy] : [R.cx, R.cy - (R.r || R.h / 2)];
-      path = [p0, p1];
-    } else if (!forward) {
-      if (dir === "tb") {
-        const x0 = a.cx + (a.r || a.w / 2);
-        const x1 = b.cx + (b.r || b.w / 2);
-        const xd = Math.max(x0, x1) + 34;
-        path = [[x0, a.cy], [xd, a.cy], [xd, b.cy], [x1, b.cy]];
+    let midHorizontal = false;
+    if (isTb) {
+      const sameRow = Math.abs(a.cy - b.cy) < (a.h + b.h) / 2 - 1;
+      const down = b.cy > a.cy;
+      if (sameRow) {
+        const adjacent = Math.abs(a.cx - b.cx) - (a.w + b.w) / 2 < 75;
+        if (dashed || !adjacent) {
+          // 回退/跳接边：绕行下方（虚线画下方，实线跳接走上方）
+          const y0 = a.cy - (a.r || a.h / 2);
+          const y1 = b.cy - (b.r || b.h / 2);
+          const yd = dashed ? Math.max(a.cy + (a.r || a.h / 2), b.cy + (b.r || b.h / 2)) + 26 : Math.min(y0, y1) - 26;
+          path = [[a.cx, dashed ? a.cy + (a.r || a.h / 2) : y0], [a.cx, yd], [b.cx, yd], [b.cx, dashed ? b.cy + (b.r || b.h / 2) : y1]];
+          midHorizontal = true;
+        } else {
+          // 行内直连：按流向取面向边（回折行流向是反的，不能按 x 排序）
+          const toRight = b.cx >= a.cx;
+          const p0: Pt = a.r > 0 ? diamondBoundary(a, b) : [a.cx + (toRight ? a.w / 2 : -a.w / 2), a.cy];
+          const p1: Pt = b.r > 0 ? diamondBoundary(b, a) : [b.cx + (toRight ? -b.w / 2 : b.w / 2), b.cy];
+          path = [p0, p1];
+        }
+      } else if (Math.abs(a.cx - b.cx) < 8) {
+        path = [
+          a.r > 0 ? diamondBoundary(a, b) : [a.cx, a.cy + (down ? a.h / 2 : -a.h / 2)],
+          b.r > 0 ? diamondBoundary(b, a) : [b.cx, b.cy + (down ? -b.h / 2 : b.h / 2)],
+        ];
       } else {
+        const from = a.r > 0 ? diamondBoundary(a, b) : [a.cx, a.cy + (down ? a.h / 2 : -a.h / 2)];
+        const to = b.r > 0 ? diamondBoundary(b, a) : [b.cx, b.cy + (down ? -b.h / 2 : b.h / 2)];
+        path = [from, [b.cx, from[1]], [b.cx, to[1]], to];
+      }
+    } else {
+      const forward = b.cx > a.cx + 1;
+      const sameBand = Math.abs(a.cx - b.cx) < (a.w + b.w) / 2;
+      if (sameBand) {
+        const ahead = a.cy <= b.cy;
+        const Lb = ahead ? a : b;
+        const Rb = ahead ? b : a;
+        path = [
+          [Lb.cx, Lb.cy + (Lb.r || Lb.h / 2)],
+          [Rb.cx, Rb.cy - (Rb.r || Rb.h / 2)],
+        ];
+      } else if (!forward) {
         const y0 = a.cy + (a.r || a.h / 2);
         const y1 = b.cy + (b.r || b.h / 2);
         const yd = Math.max(y0, y1) + 34;
         path = [[a.cx, y0], [a.cx, yd], [b.cx, yd], [b.cx, y1]];
+        midHorizontal = true;
+      } else {
+        const p0 = a.r > 0 ? diamondBoundary(a, b) : boxAnchor(a, dir, true, true);
+        const p1 = b.r > 0 ? diamondBoundary(b, a) : boxAnchor(b, dir, true, false);
+        const bendGap = Math.abs(p0[1] - p1[1]);
+        path = bendGap > 8 ? bentPath(p0, p1, dir) : [p0, p1];
       }
-    } else {
-      const p0 = a.r > 0 ? diamondBoundary(a, b) : boxAnchor(a, dir, true, true);
-      const p1 = b.r > 0 ? diamondBoundary(b, a) : boxAnchor(b, dir, true, false);
-      const bendGap = dir === "tb" ? Math.abs(p0[0] - p1[0]) : Math.abs(p0[1] - p1[1]);
-      path = bendGap > 8 ? bentPath(p0, p1, dir) : [p0, p1];
     }
     if (path.length === 2) {
       out.push(
@@ -294,7 +349,8 @@ function flowLayout(input: FlowInput, prefix: string, order: number): ComposeBat
         putLabel(out, e.label, (path[0][0] + path[1][0]) / 2, (path[0][1] + path[1][1]) / 2 - lblFont * 0.7, lblFont);
       } else {
         const [m1, m2] = [path[1], path[2]];
-        if (dir === "tb") putLabel(out, e.label, m1[0] + lblFont * 0.6, (m1[1] + m2[1]) / 2, lblFont);
+        if (midHorizontal) putLabel(out, e.label, (m1[0] + m2[0]) / 2, m1[1] + lblFont * 1.05, lblFont);
+        else if (isTb) putLabel(out, e.label, m1[0] + lblFont * 0.6, (m1[1] + m2[1]) / 2, lblFont);
         else putLabel(out, e.label, (m1[0] + m2[0]) / 2, m1[1] - lblFont * 0.7, lblFont);
       }
     }
