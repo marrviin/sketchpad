@@ -22,6 +22,8 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { downloadBlob, exportSketchPng, exportStamp, resolveFromRoot, type SketchpadExportDoc } from "@/lib/sketch-export";
+import { downloadSketchVideo } from "@/lib/sketch-video";
 
 /**
  * 画板页：looseleaf Sketchpad 组件全页铺开 + 画板后端同步（多画布）。
@@ -322,6 +324,42 @@ function SketchpadPage() {
     }
   }, [offline]);
 
+  /* 导出（用户把图拿走）：右键菜单入口——PNG（图标/笔迹栅格化 + 文本 canvas 补画）与
+     叙事回放视频（MediaRecorder 实时录制，mp4 优先）。导出期间菜单项禁用 + 底部进度 */
+  const [exporting, setExporting] = useState<{ kind: "png" | "video"; progress: number } | null>(null);
+  const toExportDoc = useCallback((): SketchpadExportDoc | null => {
+    if (!doc) return null;
+    return { width: doc.width, height: doc.height, strokes: doc.strokes, texts: doc.texts, icons: doc.icons ?? [] };
+  }, [doc]);
+  const handleExportPng = useCallback(async () => {
+    const d = toExportDoc();
+    if (!d || exporting) return;
+    setExporting({ kind: "png", progress: 0 });
+    try {
+      const blob = await exportSketchPng(d, { resolve: resolveFromRoot() });
+      if (blob) downloadBlob(`sketchpad-${exportStamp()}.png`, blob);
+    } catch (err) {
+      console.error("sketchpad png export failed", err);
+    } finally {
+      setExporting(null);
+    }
+  }, [toExportDoc, exporting]);
+  const handleExportVideo = useCallback(async () => {
+    const d = toExportDoc();
+    if (!d || exporting) return;
+    setExporting({ kind: "video", progress: 0 });
+    try {
+      await downloadSketchVideo({ ...d, groups: doc?.groups }, {
+        resolve: resolveFromRoot(),
+        onProgress: (p) => setExporting((e) => (e?.kind === "video" ? { ...e, progress: p } : e)),
+      });
+    } catch (err) {
+      console.error("sketchpad video export failed", err);
+    } finally {
+      setExporting(null);
+    }
+  }, [toExportDoc, exporting, doc]);
+
   if (!doc) {
     // 文档未到位：空白过场（不做任何加载提示，fit 揭示门会让内容就绪后直接出现）
     return <main className="min-h-dvh" />;
@@ -395,13 +433,27 @@ function SketchpadPage() {
               <SketchpadCanvas className="min-h-0 flex-1" label="Sketchpad" autoFit />
             </Sketchpad>
           </ContextMenuTrigger>
-          {/* 右键菜单：叙事回放（空画布禁用） */}
-          <ContextMenuContent className="w-40">
+          {/* 右键菜单：叙事回放 + 导出（空画布禁用） */}
+          <ContextMenuContent className="w-44">
             <ContextMenuItem disabled={!hasContent} onSelect={() => apiRef.current?.replay()}>
               回放
             </ContextMenuItem>
+            <ContextMenuItem disabled={!hasContent || !!exporting} onSelect={() => void handleExportPng()}>
+              导出图片（PNG）
+            </ContextMenuItem>
+            <ContextMenuItem disabled={!hasContent || !!exporting} onSelect={() => void handleExportVideo()}>
+              导出视频
+            </ContextMenuItem>
           </ContextMenuContent>
         </ContextMenu>
+        {/* 导出进度（PNG 栅格化 / 视频实时录制期间） */}
+        {exporting && (
+          <div className="pointer-events-none fixed bottom-6 left-1/2 z-30 -translate-x-1/2">
+            <div className="rounded-full border border-line bg-paper/90 px-4 py-1.5 text-[13px] text-ink backdrop-blur-md">
+              {exporting.kind === "png" ? "正在导出图片…" : `正在导出视频 ${Math.round(exporting.progress * 100)}%`}
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );

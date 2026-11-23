@@ -36,7 +36,7 @@ import {
   type StrokeMarkup,
 } from "@content-forge/ink/recipes/sketchpad-ink"
 import { svgToPngDataUrl } from "@/lib/sketch-export"
-import { replayRevealOrder, GROUP_GAP, type ReplayGroupLite } from "@/lib/replay-order"
+import { buildReplayTimeline, replayRevealOrder, type ReplayGroupLite, type ReplayTiming } from "@/lib/replay-order"
 import { cn } from "@/lib/utils"
 
 type StrokeInput = Omit<SketchStroke, "id"> & { id?: string }
@@ -733,11 +733,6 @@ function SketchpadClear({ children, onClick, ...props }: ButtonProps) {
   )
 }
 
-interface ReplayTiming {
-  delay: number
-  dur: number
-}
-
 /** 可视世界矩形（norm 于世界坐标，含边距），用于视口裁剪 */
 interface ViewRect {
   x0: number
@@ -955,35 +950,15 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
   // 回放编排：strokes 与 strokes 数组同下标对齐（StrokeShape 按 replay.strokes[i] 取）；
   // texts/icons 各自同下标放揭示时刻（秒）——文本/icon 不做逐笔动画，到点淡入。
   // 有语义分组时按叙事层级逐组播放（组内笔迹→文本→icon，组间 GROUP_GAP 停顿），
-  // 无组退回文档顺序、文本/icon 即时显现（原行为）。
+  // 无组退回文档顺序、文本/icon 即时显现（原行为）。编排逻辑在 buildReplayTimeline
+  // （与导出共用），这里只决定每笔时长：几何长度 ÷ 速度，非录制时的真实速度。
   // 必须先于 strokeInfos（strokeTier 的回放锁定要读 timing）
-  const timing = React.useMemo<
-    { strokes: ReplayTiming[]; texts: (number | undefined)[]; icons: (number | undefined)[] } | null
-  >(() => {
+  const timing = React.useMemo(() => {
     if (!ctx.replaying) return null
-    const out: ReplayTiming[] = new Array(ctx.strokes.length)
-    const textAt: (number | undefined)[] = new Array(ctx.texts.length)
-    const iconAt: (number | undefined)[] = new Array(ctx.icons.length)
-    let t = 0.2
-    let prevKey: number | undefined
-    const seq =
-      replayRevealOrder(ctx.strokes, ctx.texts, ctx.icons, ctx.groups) ??
-      ctx.strokes.map((_, i) => ({ kind: "stroke" as const, index: i, orderKey: Infinity }))
-    for (const item of seq) {
-      if (prevKey !== undefined && item.orderKey !== prevKey) t += GROUP_GAP
-      if (item.kind === "stroke") {
-        const s = ctx.strokes[item.index]
-        const dur = Math.min(2.4, Math.max(0.14, strokeMarkup(s, { tier }).length / (420 * ctx.replaySpeed)))
-        out[item.index] = { delay: t, dur }
-        t += dur + 0.08
-      } else if (item.kind === "text") {
-        textAt[item.index] = t
-      } else {
-        iconAt[item.index] = t
-      }
-      prevKey = item.orderKey
-    }
-    return { strokes: out, texts: textAt, icons: iconAt }
+    const order = replayRevealOrder(ctx.strokes, ctx.texts, ctx.icons, ctx.groups)
+    return buildReplayTimeline(order, { strokes: ctx.strokes.length, texts: ctx.texts.length, icons: ctx.icons.length }, (i) =>
+      Math.min(2.4, Math.max(0.14, strokeMarkup(ctx.strokes[i], { tier }).length / (420 * ctx.replaySpeed))),
+    )
   }, [ctx.replaying, ctx.strokes, ctx.texts, ctx.icons, ctx.replaySpeed, ctx.groups, tier])
 
   // 已播完的元素（animationend 后摘 mask/动画转静态渲染）：mask 是光栅化纹理，128 笔全挂着
@@ -1598,7 +1573,7 @@ function SketchpadCanvas({ className, style: styleProp, children, label = "Drawi
                   stroke={s}
                   m={m}
                   dim={erasing.has(s.id)}
-                  replay={timing.strokes[i]}
+                  replay={timing.strokes[i] ?? null}
                   onDone={onStrokeDone}
                   maskId={`ll-replay-${uid}-${i}`}
                 />

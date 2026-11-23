@@ -118,3 +118,56 @@ export function replayRevealOrder(
   chunks.sort((a, b) => (a.orderKey !== b.orderKey ? a.orderKey - b.orderKey : a.firstDoc - b.firstDoc))
   return chunks.flatMap((c) => c.items.map(({ kind, index, orderKey }) => ({ kind, index, orderKey })))
 }
+
+/** 单个笔迹/文本/icon 的回放揭示时刻（秒） */
+export interface ReplayTiming {
+  delay: number
+  dur: number
+}
+
+export interface ReplayTimeline {
+  strokes: (ReplayTiming | undefined)[]
+  texts: (number | undefined)[]
+  icons: (number | undefined)[]
+  /** 全部揭示完成的总时长（含文本淡入窗口） */
+  end: number
+}
+
+const STROKE_TAIL = 0.08
+const TEXT_FADE = 0.18
+
+/**
+ * 回放时间轴（纯函数）：按揭示序列编排每个元素的揭示时刻。
+ * order 传 replayRevealOrder 的结果；null = 无组文档顺序（文本/icon 即时显现）。
+ * durOf(i) = 第 i 笔的播放时长（调用方决定，通常按几何长度 ÷ 速度）。
+ * 页面回放与导出（PNG/视频）共用同一编排，保证两端节奏一致。
+ */
+export function buildReplayTimeline(
+  order: readonly ReplayItem[] | null,
+  counts: { strokes: number; texts: number; icons: number },
+  durOf: (index: number) => number,
+): ReplayTimeline {
+  const out: (ReplayTiming | undefined)[] = new Array(counts.strokes)
+  const textAt: (number | undefined)[] = new Array(counts.texts)
+  const iconAt: (number | undefined)[] = new Array(counts.icons)
+  // order === null（无组）：与页面旧行为一致，只编排笔迹；文本/icon 不进序列 = 即时显现
+  const seq: readonly ReplayItem[] =
+    order ??
+    Array.from({ length: counts.strokes }, (_, i) => ({ kind: "stroke" as const, index: i, orderKey: Infinity }))
+  let t = 0.2
+  let prevKey: number | undefined
+  for (const item of seq) {
+    if (prevKey !== undefined && item.orderKey !== prevKey) t += GROUP_GAP
+    if (item.kind === "stroke") {
+      const dur = durOf(item.index)
+      out[item.index] = { delay: t, dur }
+      t += dur + STROKE_TAIL
+    } else if (item.kind === "text") {
+      textAt[item.index] = t
+    } else {
+      iconAt[item.index] = t
+    }
+    prevKey = item.orderKey
+  }
+  return { strokes: out, texts: textAt, icons: iconAt, end: t + TEXT_FADE }
+}
