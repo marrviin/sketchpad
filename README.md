@@ -4,25 +4,17 @@
 
 sketchpad 是一块 looseleaf 手绘板：手绘风页面（笔刷质感、颗粒、压力）、REST/SSE 后端和一套 CLI / 工具接口。AI agent 经 CLI 或工具调用在画板上画架构图、流程图、原型草图和手绘 icon，**每一笔秒级出现在你的浏览器里**；页面是纯查看器——拖拽平移、滚轮缩放、切换画布、叙事回放，作画全部交给 agent。
 
-**推荐：安装为 agent 技能**（一键装上「会画手绘板」的完整工作流——画 → 自查 → 修正循环、网格定位、叙事层级、质量基线）：
+## 安装
 
 ```bash
 npx skills add marrviin/sketchpad
 ```
 
-装好后 agent 直接知道怎么用 sketchpad；再装 CLI 本体即可开箱即画：
+装完在 Claude Code 里直接说一句——
 
-```bash
-npm i -g @content-forge/sketchpad
-sketchpad ui    # 打开（或拉起）画板服务并打印页面地址
-```
+> 帮我画一张登录流程图
 
-也可以只装 CLI 手动使用：
-
-```bash
-npm i -g @content-forge/sketchpad
-sketchpad ui    # 打开（或拉起）画板服务并打印页面地址
-```
+agent 会自己起画板、构图、落笔、自查，**你在浏览器里看着它画**。不用记命令、不用手动安装，skill 把「画 → 自查 → 修正」的工作流全包了。
 
 ## 效果演示
 
@@ -63,19 +55,21 @@ agent 的每一笔经 SSE 秒级出现在页面。开一个浏览器窗口挂在
 **按比例思考**
 画布坐标支持 `unit: "norm"`（0~1 归一化），agent 按比例布局不用算像素；也支持像素坐标画框外内容。
 
-## 用起来是什么样
+## 手动调用 CLI（可选）
+
+skill 装好后一般不需要手动敲命令；想自己控制时：
 
 ```bash
-sketchpad ui              # 拉起服务，打印页面地址，浏览器打开
-sketchpad new             # 新建画布
-sketchpad compose @flow.json    # 场景构图：结构骨架一次成图（flow/sequence/wireframe）
-sketchpad draw '{"unit":"norm","shapes":[…]}'   # agent 手绘细节/自由形状，页面实时看到
-sketchpad lint            # 几何自查：重叠/压线/出框，返回可修的 id 清单
-sketchpad snapshot        # 渲染 PNG 给 agent 自查
-sketchpad undo            # 画错了撤销重来
+npx -y @content-forge/sketchpad ui     # 拉起服务，打印页面地址，浏览器打开
+sketchpad new                          # 新建画布
+sketchpad compose @flow.json           # 场景构图：结构骨架一次成图（flow/sequence/wireframe）
+sketchpad draw '{"unit":"norm","shapes":[…]}'   # 手绘细节/自由形状，页面实时看到
+sketchpad lint                         # 几何自查：重叠/压线/出框，返回可修的 id 清单
+sketchpad snapshot                     # 渲染 PNG 给 agent 自查
+sketchpad undo                         # 画错了撤销重来
 ```
 
-**作为 agent 技能使用**：[`packages/cli/skill/SKILL.md`](packages/cli/skill/SKILL.md) 是完整的创作工作流 skill（画 → 自查 → 修正循环、网格定位、叙事层级、质量基线）。推荐用 `npx skills add marrviin/sketchpad` 一键安装；也可手动复制到 `~/.claude/skills/sketchpad/`，让 Claude Code 装上「会画手绘板」的能力。
+skill 本体（完整创作工作流）见 [`packages/cli/skill/SKILL.md`](packages/cli/skill/SKILL.md)。
 
 **daemon 集成**：装了 [`@content-forge/daemon`](https://www.npmjs.com/package/@content-forge/daemon) 时自动注册进守护进程，画板挂在 `/project/<项目名>/sketchpad/`，与统一前端生态共用路由；没有 daemon 就起本地常驻服务，开箱即用。
 
