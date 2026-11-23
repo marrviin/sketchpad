@@ -1,8 +1,21 @@
 # sketchpad · 手绘板
 
-**让 AI agent 把想法画成一张手绘白板，你在浏览器里实时看着它画。**
+[English](README.en.md) · **中文**
 
-sketchpad 是一块 looseleaf 手绘板：手绘风页面（笔刷质感、颗粒、压力）、REST/SSE 后端和一套 CLI / 工具接口。AI agent 经 CLI 或工具调用在画板上画架构图、流程图、原型草图和手绘 icon，**每一笔秒级出现在你的浏览器里**；页面是纯查看器——拖拽平移、滚轮缩放、切换画布、叙事回放，作画全部交给 agent。
+> **让 AI agent 把想法画成一张手绘白板，你在浏览器里实时看着它画。**
+
+[![npm version](https://img.shields.io/npm/v/@content-forge/sketchpad.svg)](https://www.npmjs.com/package/@content-forge/sketchpad)
+[![license](https://img.shields.io/npm/l/@content-forge/sketchpad.svg)](LICENSE)
+[![stars](https://img.shields.io/github/stars/marrviin/sketchpad.svg)](https://github.com/marrviin/sketchpad)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/marrviin/sketchpad/pulls)
+
+---
+
+## 它是什么
+
+sketchpad 是一块 **agent 驱动**的手绘白板。人不碰笔——你用自然语言让 agent 画架构图、流程图、原型草图、手绘 icon，每一笔经 SSE 秒级出现在浏览器里。页面是纯查看器：拖拽平移、滚轮缩放、切换画布、叙事回放，作画全部交给 agent。
+
+风格是纸笔手绘（笔刷质感、颗粒、压力、手写字体），不是默认的矢量图形库。
 
 ## 安装
 
@@ -14,7 +27,7 @@ npx skills add marrviin/sketchpad
 
 > 帮我画一张登录流程图
 
-agent 会自己起画板、构图、落笔、自查，**你在浏览器里看着它画**。不用记命令、不用手动安装，skill 把「画 → 自查 → 修正」的工作流全包了。
+agent 自己起画板、构图、落笔、自查，**你在旁边浏览器里看着它画**。不用记命令、不用手动安装，skill 把「画 → 自查 → 修正」的工作流全包了。
 
 ## 效果演示
 
@@ -22,59 +35,67 @@ agent 会自己起画板、构图、落笔、自查，**你在浏览器里看着
 |---|---|
 | <video src="docs/demo-wireframe.mp4" controls muted loop></video> | <video src="docs/demo-flow.mp4" controls muted loop></video> |
 
-## 它擅长画什么
+## 能画什么
 
-- **手绘架构图 / 流程图**：方框、箭头、连接线，配合网格定位对得整齐；spline 过点平滑曲线画有机形状，hatch 画排线阴影
-- **手绘风原型草图**：页面骨架、设备框、分区、卡片——用「叙事层级」从背景到标注逐层铺开，回放时像讲产品一样逐层演示
-- **手绘 icon**：内置 160 个手绘 icon（数据库、云、齿轮、人物……），agent 直接按名字取用
-- **白板演示**：毡头笔 / 毛笔 / 铅笔 / 马克笔 / 荧光笔的笔刷质感 + 真实手写风字体，画出来像纸笔，不像默认图形库
+- **手绘架构图 / 流程图**：方框、箭头、连接线，网格定位对齐；spline 过点平滑曲线，hatch 画排线阴影
+- **手绘风原型草图**：页面骨架、设备框、分区、卡片——叙事层级从背景到标注逐层铺开
+- **手绘 icon**：内置 160 个手绘 icon（数据库、云、齿轮、人物……），按名字取用
+- **白板演示**：毡头笔 / 毛笔 / 铅笔 / 马克笔 / 荧光笔 + 真实手写风字体
+
+## 为什么不是 tldraw / excalidraw
+
+| | 人画 | 让 agent 画 |
+|---|---|---|
+| tldraw / excalidraw | ✅ | 图形风、agent 画出来像 PPT |
+| **sketchpad** | ❌（只看） | ✅ 手绘风 + agent 工作流（自查、lint、叙事回放） |
+
+sketchpad 的设计目标不是「给人多一个画图工具」，而是「给 agent 一块像样的画板」——所以才内置 snapshot 自查、lint 几何体检、叙事分幕回放这些 agent 视角的能力。
+
+## 工作原理
+
+```
+你 → Claude Code / agent
+     ↓ 自然语言
+     skill 指导 agent 调 CLI（sketchpad draw / compose / snapshot / lint）
+     ↓ HTTP POST
+   本地后端（.content-forge/sketchpad/<id>.json 落盘）
+     ↓ SSE 推送增量
+   浏览器页面（纯查看器，实时显示）
+```
+
+agent 每画完一张会 `snapshot` 渲染成 PNG 自己看，发现画歪了就 `undo` 重画——这个闭环不靠模型自觉，是工具保证的。
 
 ## 核心能力
 
-**实时同步观看**
-agent 的每一笔经 SSE 秒级出现在页面。开一个浏览器窗口挂在旁边，就是一块实时直播的白板；页面拖拽平移、滚轮缩放、右上角切换画布，怎么舒服怎么看。
-
-**多画布隔离**
-每块画布有独立 id、版本与撤销栈，并发 agent 各绑一块画布互不影响。数据落盘 `<项目根>/.content-forge/sketchpad/<id>.json`，重启不丢。
-
-**snapshot 自查回路**
-`sketchpad snapshot` 把画布渲染成 PNG 给 agent 自己看——画 → 自查 → 修正，agent 不需要问你「画得怎么样」，画错了自己 `undo` 重来。
-
-**场景构图：画得好是算法保证，不是模型自觉**
-流程图、时序图、原型骨架这些结构化场景，agent 给结构化描述（节点/连线/参与者/分区），`sketchpad compose` 内置确定性布局一次成图——节点按文字宽度自适应、对齐与间距由算法保证、连线自动贴边、回退边自动绕行。而且**按叙事分幕落笔**：流程图沿图逐节点走、时序图逐消息一幕，回放就是沿图讲故事，不是平铺。agent 再在手绘细节上自由发挥，骨架不会乱。
-
-**叙事大纲与叙事体检**
-`sketchpad state {"narrative":true}` 输出回放故事线（各幕顺序 + 预计时长），agent 演示前先「读一遍故事」；`sketchpad lint` 自动检查叙事质量——未设层级的组（回放垫底）、单组吞掉全图（没节奏）、标注层混入结构，连同几何问题一起给 agent 修。叙事顺序清晰是算法和工具保证的，不靠模型自觉。
-
-**lint 自查回路**
-`sketchpad snapshot` 渲染 PNG 给 agent 目测，`sketchpad lint` 把「画得不好」的可计算信号变成清单——文本重叠、文字压在框线/箭头上、内容出框，返回元素 id，agent 直接删掉重画。画 → lint → snapshot → 修正，质量闭环不靠运气。
-
-**叙事层级 + 回放**
-回放按「讲故事」编排：多屏产品动线（列表 → 详情 → 评论）每屏一幕——手机框、内容、文字一起出现，讲完一屏再进下一屏；单视图则按 画布 → 骨架 → 内容 → 标注 分层推进。agent 作画时用 `group` + `order` 声明章节，页面右键「回放」或 `?replay=1` 逐幕演示；`sketchpad order` 可事后修序，不用重画。
-
-**按比例思考**
-画布坐标支持 `unit: "norm"`（0~1 归一化），agent 按比例布局不用算像素；也支持像素坐标画框外内容。
+- **实时同步**：每笔 SSE 秒级出现在页面，开个窗口挂旁边就是直播白板
+- **多画布隔离**：每块画布独立 id / 版本 / 撤销栈，并发 agent 各绑一块互不影响
+- **compose 场景构图**：流程图、时序图、原型骨架给结构化描述，内置确定性布局一次成图——对齐、间距、连线贴边、回退绕行都是算法保证，不靠模型手画
+- **叙事分幕回放**：多屏产品动线每屏一幕，单视图按 画布 → 骨架 → 内容 → 标注 分层；页面右键「回放」或 `?replay=1` 逐幕演示
+- **snapshot 自查回路**：`sketchpad snapshot` 渲染 PNG 给 agent 自己看，`lint` 把重叠 / 压线 / 出框变成可修的 id 清单，agent 直接删了重画
+- **按比例思考**：支持 `unit: "norm"`（0~1 归一化），agent 按比例布局不用算像素
 
 ## 手动调用 CLI（可选）
 
 skill 装好后一般不需要手动敲命令；想自己控制时：
 
 ```bash
-npx -y @content-forge/sketchpad ui     # 拉起服务，打印页面地址，浏览器打开
-sketchpad new                          # 新建画布
-sketchpad compose @flow.json           # 场景构图：结构骨架一次成图（flow/sequence/wireframe）
-sketchpad draw '{"unit":"norm","shapes":[…]}'   # 手绘细节/自由形状，页面实时看到
-sketchpad lint                         # 几何自查：重叠/压线/出框，返回可修的 id 清单
-sketchpad snapshot                     # 渲染 PNG 给 agent 自查
-sketchpad undo                         # 画错了撤销重来
+npx -y @content-forge/sketchpad ui               # 拉起服务，打印页面地址
+sketchpad new                                    # 新建画布
+sketchpad compose @flow.json                     # 场景构图（flow/sequence/wireframe）
+sketchpad draw '{"unit":"norm","shapes":[…]}'    # 手绘细节，页面实时看到
+sketchpad lint                                   # 几何自查：重叠/压线/出框
+sketchpad snapshot                               # 渲染 PNG 自查
+sketchpad undo                                   # 撤销重来
 ```
 
 skill 本体（完整创作工作流）见 [`packages/cli/skill/SKILL.md`](packages/cli/skill/SKILL.md)。
 
-**daemon 集成**：装了 [`@content-forge/daemon`](https://www.npmjs.com/package/@content-forge/daemon) 时自动注册进守护进程，画板挂在 `/project/<项目名>/sketchpad/`，与统一前端生态共用路由；没有 daemon 就起本地常驻服务，开箱即用。
+**daemon 集成**：装了 [`@content-forge/daemon`](https://www.npmjs.com/package/@content-forge/daemon) 时自动注册进守护进程，画板挂在 `/project/<项目名>/sketchpad/`；没有 daemon 就起本地常驻服务，开箱即用。
 
 ## 开发
 
-本仓库是 pnpm monorepo：[`packages/cli`](packages/cli/)（发布包：CLI + 后端 + snapshot 渲染器 + 技能）与 [`packages/web`](packages/web/)（React 前端）。构建、typecheck 与目录结构见 [`packages/cli/README.md`](packages/cli/README.md#开发)。
+本仓库是 pnpm monorepo：[`packages/cli`](packages/cli/)（CLI + 后端 + snapshot 渲染器 + skill）与 [`packages/web`](packages/web/)（React 前端）。构建、typecheck 与目录结构见 [`packages/cli/README.md`](packages/cli/README.md#开发)。
 
-License: MIT（字体各自遵循其 OFL 许可）
+## License
+
+MIT（内置字体各自遵循其 OFL 许可）。
