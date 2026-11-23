@@ -9,6 +9,16 @@ sketchpad = looseleaf Sketchpad 画板（统一前端 `/sketchpad` 入口）+ CL
 
 人在浏览器页面画/擦/撤销会回流后端，agent 的每一笔经 SSE 秒级出现在页面上。
 
+## 准备：安装 sketchpad CLI
+
+先探测 `command -v sketchpad`；没有就装（全局一次即可）：
+
+```bash
+npm i -g @content-forge/sketchpad        # 装不上时临时加 --registry=https://registry.npmjs.org（国内镜像同步有延迟）
+```
+
+不想全局装也可用 `npx -y @content-forge/sketchpad` 代替下面的 `sketchpad` 前缀。装完直接跑 `sketchpad state`——没有 daemon 时会自动起本地常驻服务，无需手动启动。
+
 ## 标准流程：画 → 自查 → 修正（循环）
 
 ```bash
