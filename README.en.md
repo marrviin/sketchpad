@@ -34,6 +34,7 @@ The agent spins up a canvas, composes the layout, draws, self-checks, and **you 
 | Multi-screen wireframe walkthrough (narrative replay) | Flowchart (compose scene layout) |
 |---|---|
 | <video src="docs/demo-wireframe.mp4" controls muted loop></video> | <video src="docs/demo-flow.mp4" controls muted loop></video> |
+| ![](docs/demo-wireframe.png) | ![](docs/demo-flow.png) |
 
 ## What it draws
 
@@ -91,10 +92,6 @@ sketchpad undo                                   # roll back
 The skill itself (the full creative workflow) lives at [`packages/cli/skill/SKILL.md`](packages/cli/skill/SKILL.md).
 
 **Daemon integration**: with [`@content-forge/daemon`](https://www.npmjs.com/package/@content-forge/daemon) installed, sketchpad auto-registers under `/project/<project>/sketchpad/`; without it, a local persistent server runs out of the box.
-
-## Development
-
-pnpm monorepo: [`packages/cli`](packages/cli/) (CLI + backend + snapshot renderer + skill) and [`packages/web`](packages/web/) (React frontend). Build, typecheck, and layout details in [`packages/cli/README.md`](packages/cli/README.md#development).
 
 ## License
 

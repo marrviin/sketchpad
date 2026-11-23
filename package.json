@@ -1,12 +1,14 @@
 {
   "name": "sketchpad-workspace",
   "private": true,
+  "packageManager": "pnpm@12.18.0",
   "scripts": {
     "build": "pnpm --filter @content-forge/sketchpad-web build && pnpm --filter @content-forge/sketchpad build",
     "build:server": "pnpm --filter @content-forge/sketchpad build",
     "build:web": "pnpm --filter @content-forge/sketchpad-web build",
     "dev:web": "pnpm --filter @content-forge/sketchpad-web dev",
     "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @content-forge/sketchpad test",
     "ui": "pnpm --filter @content-forge/sketchpad ui"
   },
   "engines": {

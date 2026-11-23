@@ -306,8 +306,8 @@ function flowLayout(input: FlowInput, prefix: string, order: number): ComposeBat
           b.r > 0 ? diamondBoundary(b, a) : [b.cx, b.cy + (down ? -b.h / 2 : b.h / 2)],
         ];
       } else {
-        const from = a.r > 0 ? diamondBoundary(a, b) : [a.cx, a.cy + (down ? a.h / 2 : -a.h / 2)];
-        const to = b.r > 0 ? diamondBoundary(b, a) : [b.cx, b.cy + (down ? -b.h / 2 : b.h / 2)];
+        const from = a.r > 0 ? diamondBoundary(a, b) : ([a.cx, a.cy + (down ? a.h / 2 : -a.h / 2)] as Pt);
+        const to = b.r > 0 ? diamondBoundary(b, a) : ([b.cx, b.cy + (down ? -b.h / 2 : b.h / 2)] as Pt);
         path = [from, [b.cx, from[1]], [b.cx, to[1]], to];
       }
     } else {

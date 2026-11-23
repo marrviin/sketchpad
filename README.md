@@ -34,6 +34,7 @@ agent 自己起画板、构图、落笔、自查，**你在旁边浏览器里看
 | 多屏原型动线（叙事回放） | 流程图（compose 场景构图） |
 |---|---|
 | <video src="docs/demo-wireframe.mp4" controls muted loop></video> | <video src="docs/demo-flow.mp4" controls muted loop></video> |
+| ![](docs/demo-wireframe.png) | ![](docs/demo-flow.png) |
 
 ## 能画什么
 
@@ -91,10 +92,6 @@ sketchpad undo                                   # 撤销重来
 skill 本体（完整创作工作流）见 [`packages/cli/skill/SKILL.md`](packages/cli/skill/SKILL.md)。
 
 **daemon 集成**：装了 [`@content-forge/daemon`](https://www.npmjs.com/package/@content-forge/daemon) 时自动注册进守护进程，画板挂在 `/project/<项目名>/sketchpad/`；没有 daemon 就起本地常驻服务，开箱即用。
-
-## 开发
-
-本仓库是 pnpm monorepo：[`packages/cli`](packages/cli/)（CLI + 后端 + snapshot 渲染器 + skill）与 [`packages/web`](packages/web/)（React 前端）。构建、typecheck 与目录结构见 [`packages/cli/README.md`](packages/cli/README.md#开发)。
 
 ## License
 

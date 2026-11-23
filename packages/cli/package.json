@@ -21,6 +21,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "ui": "node bin/sketchpad.js ui"
   },
   "dependencies": {
@@ -39,6 +40,7 @@
   "devDependencies": {
     "@content-forge/daemon": "^0.1.0",
     "@types/node": "^24.19.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.1"
   }
 }
