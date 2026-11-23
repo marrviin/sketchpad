@@ -368,9 +368,12 @@ function flowLayout(input: FlowInput, prefix: string, order: number): ComposeBat
   for (const id of queue) {
     const n = byId.get(id)!;
     const b = boxes.get(id)!;
+    const L = layer.get(id)!;
     const shapes: ShapeSpec[] = [];
+    // 前向入边：线先于节点出现（指向本幕主角）；回退/平层出边挂源头幕——
+    // 边从本节点出发，必须等节点出现后再画，否则回放时线会悬在半空
     for (const e of input.edges) {
-      if (e.to === id) shapes.push(...edgeShapes(e));
+      if (e.to === id && layer.get(e.from)! < L) shapes.push(...edgeShapes(e));
     }
     if (n.kind === "decision") {
       shapes.push({
@@ -395,6 +398,9 @@ function flowLayout(input: FlowInput, prefix: string, order: number): ComposeBat
     }
     const fs = n.kind === "decision" ? Math.min(font, b.r * 0.72) : font;
     putLabel(shapes, n.label, b.cx, b.cy + (n.icon ? 6 : 0), fs);
+    for (const e of input.edges) {
+      if (e.from === id && layer.get(e.to)! <= L) shapes.push(...edgeShapes(e));
+    }
     batches.push({ group: uniqueName(n.label, n.id, used), order, shapes });
   }
   return batches;
