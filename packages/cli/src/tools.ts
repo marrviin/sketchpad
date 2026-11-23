@@ -394,7 +394,8 @@ export function sketchpadToolDefs(): ToolDef[] {
         "scene=flow 流程图：nodes [{id,label,kind?,icon?}]+edges [{from,to,label?,dashed?}]，dir=tb(默认)/lr。" +
         "kind: start/end=椭圆（首尾） process=圆角矩形（默认） decision=菱形（分支判断）；icon 为 looseleaf 名画在文字上方。\n" +
         "scene=sequence 时序图：participants [{id,label}]+messages [{from,to,label?,kind?:solid|dashed}]（按发生顺序；from===to 画自调用回环）。\n" +
-        "scene=wireframe 原型骨架：frame=phone/browser + regions [{x,y,w,h,label?}]（相对 frame 内容区 0~1 归一化矩形）。\n" +
+        "scene=wireframe 原型骨架：单屏 frame=phone/browser + regions [{x,y,w,h,label?}]（相对 frame 内容区 0~1 归一化矩形）；" +
+        "多屏章节 frames:[{label?,frame?,regions}]——每屏一幕（框+分区+标签一起出现）、从左到右、order 逐屏递增，讲产品动线（列表→详情→评论）用它，屏间导航箭头由你最后补画。\n" +
         "适合先 compose 打底、再用 draw 叠手绘细节（涂改痕迹、装饰、组标注）；自由构图仍用 draw。",
       inputSchema: {
         canvas: makeCanvasInput(),
@@ -406,8 +407,9 @@ export function sketchpadToolDefs(): ToolDef[] {
         dir: z.enum(["tb", "lr"]).optional().describe("flow：布局方向 tb 自上而下（默认）/ lr 自左而右"),
         participants: z.array(z.object({ id: z.string().min(1).max(30), label: z.string().min(1).max(16) })).max(10).optional().describe("sequence：参与者（从左到右）"),
         messages: z.array(z.object({ from: z.string().min(1).max(30), to: z.string().min(1).max(30), label: z.string().max(16).optional(), kind: z.enum(["solid", "dashed"]).optional() })).max(16).optional().describe("sequence：消息（按发生顺序）"),
-        frame: z.enum(["phone", "browser"]).optional().describe("wireframe：设备框类型"),
+        frame: z.enum(["phone", "browser"]).optional().describe("wireframe：设备框类型（单屏用 frame+regions；多屏给 frames）"),
         regions: z.array(z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number(), label: z.string().max(12).optional() })).max(16).optional().describe("wireframe：内容区（0~1 归一化矩形 + 左上标签）"),
+        frames: z.array(z.object({ label: z.string().min(1).max(16).optional(), frame: z.enum(["phone", "browser"]).optional(), regions: z.array(z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number(), label: z.string().max(12).optional() })).max(12) })).max(6).optional().describe("wireframe 多屏章节：每屏一幕（框+分区+标签一起出现），从左到右排布、order 逐屏递增——讲产品动线（列表→详情→评论）用这个"),
         title: z.string().max(24).optional().describe("图标题（画在顶部）"),
       },
       handler: async (args) => {
@@ -424,6 +426,7 @@ export function sketchpadToolDefs(): ToolDef[] {
               messages: args.messages,
               frame: args.frame,
               regions: args.regions,
+              frames: args.frames,
               title: args.title,
             } as never,
             args.group ?? prefix,

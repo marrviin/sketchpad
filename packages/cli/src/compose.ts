@@ -95,10 +95,21 @@ export interface SequenceInput {
   title?: string;
 }
 
+export interface WireframeRegion {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  label?: string;
+}
+
 export interface WireframeInput {
-  frame: "phone" | "browser";
-  /** 相对 frame 内容区的 0~1 归一化矩形（内容区已扣掉标题栏/刘海）+ 左上角标签 */
-  regions: { x: number; y: number; w: number; h: number; label?: string }[];
+  /** 单屏模式：设备框类型 + 内容区（0~1 归一化）分区 */
+  frame?: "phone" | "browser";
+  regions?: WireframeRegion[];
+  /** 多屏章节模式：每屏一幕（框 + 分区 + 标签一起出现），从左到右排布、order 逐屏递增——
+   *  讲产品动线（列表 → 详情 → 评论）用这个；屏间导航箭头由 agent 最后一幕补画 */
+  frames?: { label?: string; frame?: "phone" | "browser"; regions: WireframeRegion[] }[];
   title?: string;
 }
 
@@ -438,53 +449,77 @@ function sequenceLayout(input: SequenceInput, prefix: string, order: number): Co
 function wireframeLayout(input: WireframeInput, prefix: string, order: number): ComposeBatch[] {
   const batches: ComposeBatch[] = [];
   const used = new Set<string>();
-  let fw: number;
-  let fh: number;
-  if (input.frame === "phone") {
-    fh = FRAME_H - 2 * MARGIN;
-    fw = fh / STENCIL_ASPECT.phone;
-  } else {
-    fw = Math.min(FRAME_W - 2 * MARGIN, (FRAME_H - 2 * MARGIN) / STENCIL_ASPECT.browser);
-    fh = fw * STENCIL_ASPECT.browser;
+  const screens =
+    input.frames && input.frames.length
+      ? input.frames.map((f) => ({ frame: f.frame ?? input.frame ?? "phone", label: f.label, regions: f.regions }))
+      : input.frame
+        ? [{ frame: input.frame, label: undefined, regions: input.regions ?? [] }]
+        : (() => {
+            throw new Error("wireframe 需要 frame（单屏）或 frames（多屏章节）");
+          })();
+  const N = screens.length;
+  if (N > 6) throw new Error(`frames 最多 6 屏（当前 ${N}）`);
+  const titleH = input.title ? F * 2.2 : 0;
+  const availW = FRAME_W - 2 * MARGIN;
+  const availH = FRAME_H - 2 * MARGIN - titleH;
+  const gap = N > 1 ? 56 : 0;
+  // 按最宽高比反推每屏尺寸：高度撞顶或宽度装不下取小者
+  let fh = availH;
+  for (const sc of screens) {
+    const aspect = STENCIL_ASPECT[sc.frame];
+    fh = Math.min(fh, ((availW - gap * (N - 1)) / N) * aspect, availH);
   }
-  const fx = (FRAME_W - fw) / 2;
-  const fy = MARGIN;
-  const inset = input.frame === "browser" ? fh * 0.16 : fh * 0.06;
-  const ix = fx + fw * 0.045;
-  const iw = fw - fw * 0.09;
-  const iy = fy + inset;
-  const ih = fh - inset - fh * 0.045;
+  // 各屏宽高（不同 kind 可混排：phone/browser 各自按同一高度定宽）
+  const geom = screens.map((sc) => {
+    const fw = fh / STENCIL_ASPECT[sc.frame];
+    return { sc, fw, fh };
+  });
+  const totalW = geom.reduce((s, g) => s + g.fw, 0) + gap * (N - 1);
+  let x = (FRAME_W - totalW) / 2;
+  const y = MARGIN + titleH + (availH - fh) / 2;
   const font = F * 0.85;
-  // ① 标题 + 设备框（order 1）
-  const frameShapes: ShapeSpec[] = [
-    { shape: "stencil", kind: input.frame, x: fx, y: fy, w: fw, h: fh, ...LINE },
-  ];
+  // ① 标题
   if (input.title) {
-    frameShapes.push({
-      shape: "text",
-      x: (FRAME_W - estimateTextWidth(input.title, font * 1.2)) / 2,
-      y: MARGIN * 0.55,
-      size: font * 1.2,
-      color: "ink",
-      text: input.title,
+    batches.push({
+      group: uniqueName(`${prefix}·标题`, "title", used),
+      order: 1,
+      shapes: [
+        {
+          shape: "text",
+          x: (FRAME_W - estimateTextWidth(input.title, font * 1.2)) / 2,
+          y: MARGIN * 0.55,
+          size: font * 1.2,
+          color: "ink",
+          text: input.title,
+        },
+      ],
     });
   }
-  batches.push({ group: uniqueName(`${prefix}·${input.frame === "phone" ? "手机框" : "浏览器框"}`, "frame", used), order: 1, shapes: frameShapes });
-  // ② 每个分区一幕（order 2 = 骨架分区；order 参数显式给则用参数）
-  input.regions.forEach((r, i) => {
-    const x = ix + r.x * iw;
-    const y = iy + r.y * ih;
-    const w = r.w * iw;
-    const h = r.h * ih;
-    const shapes: ShapeSpec[] = [{ shape: "rrect", x, y, w, h, r: 5, ...LINE }];
-    if (r.label) {
-      shapes.push({ shape: "text", x: x + 8, y: y + 7, size: font, color: "ink", text: r.label });
+  // ② 每屏一幕（章节叙事：框 + 分区 + 标签一起出现，order 逐屏递增）
+  geom.forEach(({ sc, fw }, i) => {
+    const fx = x;
+    x += fw + gap;
+    const shapes: ShapeSpec[] = [
+      { shape: "stencil", kind: sc.frame, x: fx, y, w: fw, h: fh, ...LINE },
+    ];
+    // 内容区：扣掉 browser 标题栏 / phone 刘海
+    const inset = sc.frame === "browser" ? fh * 0.16 : fh * 0.06;
+    const ix = fx + fw * 0.045;
+    const iw = fw - fw * 0.09;
+    const iy = y + inset;
+    const ih = fh - inset - fh * 0.045;
+    for (const r of sc.regions) {
+      const rx = ix + r.x * iw;
+      const ry = iy + r.y * ih;
+      const rw = r.w * iw;
+      const rh = r.h * ih;
+      shapes.push({ shape: "rrect", x: rx, y: ry, w: rw, h: rh, r: 5, ...LINE });
+      if (r.label) {
+        shapes.push({ shape: "text", x: rx + 6, y: ry + 6, size: font, color: "ink", text: r.label });
+      }
     }
-    batches.push({
-      group: uniqueName(r.label ?? `${prefix}·分区${i + 1}`, `${i}`, used),
-      order,
-      shapes,
-    });
+    const name = sc.label ?? `${prefix}·屏幕${i + 1}`;
+    batches.push({ group: uniqueName(name, `${i}`, used), order: order + i, shapes });
   });
   return batches;
 }
