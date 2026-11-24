@@ -33,8 +33,7 @@ agent 自己起画板、构图、落笔、自查，**你在旁边浏览器里看
 
 | 多屏原型动线（叙事回放） | 流程图（compose 场景构图） |
 |---|---|
-| <video src="docs/demo-wireframe.mp4" controls muted loop></video> | <video src="docs/demo-flow.mp4" controls muted loop></video> |
-| ![](docs/demo-wireframe.png) | ![](docs/demo-flow.png) |
+| ![](docs/demo-wireframe.gif) | ![](docs/demo-flow.gif) |
 
 ## 能画什么
 

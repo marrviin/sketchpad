@@ -33,8 +33,7 @@ The agent spins up a canvas, composes the layout, draws, self-checks, and **you 
 
 | Multi-screen wireframe walkthrough (narrative replay) | Flowchart (compose scene layout) |
 |---|---|
-| <video src="docs/demo-wireframe.mp4" controls muted loop></video> | <video src="docs/demo-flow.mp4" controls muted loop></video> |
-| ![](docs/demo-wireframe.png) | ![](docs/demo-flow.png) |
+| ![](docs/demo-wireframe.gif) | ![](docs/demo-flow.gif) |
 
 ## What it draws
 
