@@ -14,7 +14,7 @@
 - `size` = 边长 px；`x/y` = **盒子左上角**；`color` 套色。
 - **glyph 自动按 bbox 中心对齐盒中心**——looseleaf glyph 不满铺（各 icon bbox 不同），渲染端已按 glyph 实测中心定位，调用方只管把盒子放对。
 - icon 是独立元素（非笔迹），进 undo/redo，可被语义分组 `group` 绑定、按 id/组名擦除。
-- 查全部名字：`python3 -c "import json; print(list(json.load(open('packages/cli/src/icon-bundle.json'))['icons'].keys()))"`
+- 查全部名字：`sketchpad icons`
 
 ### 定位公式：盒中心 = 所在区域的中心线
 
@@ -62,7 +62,3 @@ y = 区域中心线 − size/2
 - 不用网格直接拍坐标 → 偏移明显。icon 小，先 `grid` 铺 24 格。
 - 有机轮廓（云、火、叶、动物）手拧 bezier → 用 `spline` 过点。
 - 忘了撤网格 → 画完 `undo` 掉，或 `erase` 网格 id。
-
-## 附：looseleaf icon 原始库位置（排查用）
-
-> 画板内置的 `icon-points`/渲染 SVG 预生成自 looseleaf 原仓库 `~/github/looseleaf/src/lib/ink/art/icons/`（160 个 ArtDef，24×24 网格 SVG 路径）。icon 形状缺某个图标/渲染异常时去那里查定义；重新导出脚本在 `~/github/looseleaf/scripts/icon-bundle.mts`。

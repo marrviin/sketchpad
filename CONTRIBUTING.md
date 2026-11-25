@@ -6,8 +6,9 @@
 
 本仓库是 pnpm monorepo：
 
-- [`packages/cli`](packages/cli/) — CLI + REST/SSE 后端 + snapshot 渲染器 + Claude skill
+- [`packages/cli`](packages/cli/) — CLI + REST/SSE 后端 + snapshot 渲染器
 - [`packages/web`](packages/web/) — React 前端（纯查看器画板）
+- [`skills/sketchpad`](skills/sketchpad/) — Claude skill（完整创作工作流）
 
 要求 Node.js ≥ 20。
 

@@ -124,6 +124,16 @@ for (const [cmd, name] of NAMED_TOOLS) {
 }
 
 program
+  .command("icons")
+  .description("列出 icon 形状可用的全部内置手绘 icon 名字")
+  .action(() => {
+    const iconBundle = JSON.parse(
+      readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "icon-bundle.json"), "utf8"),
+    ) as { icons: Record<string, unknown> };
+    console.log(Object.keys(iconBundle.icons).join(" "));
+  });
+
+program
   .command("ui")
   .description("确保画板服务在线并打印页面地址（装了 @content-forge/daemon 走守护进程，否则本地常驻）")
   .action(async () => {

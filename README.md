@@ -88,7 +88,7 @@ sketchpad snapshot                               # 渲染 PNG 自查
 sketchpad undo                                   # 撤销重来
 ```
 
-skill 本体（完整创作工作流）见 [`packages/cli/skill/SKILL.md`](packages/cli/skill/SKILL.md)。
+skill 本体（完整创作工作流）见 [`skills/sketchpad/SKILL.md`](skills/sketchpad/SKILL.md)。
 
 **daemon 集成**：装了 [`@content-forge/daemon`](https://www.npmjs.com/package/@content-forge/daemon) 时自动注册进守护进程，画板挂在 `/project/<项目名>/sketchpad/`；没有 daemon 就起本地常驻服务，开箱即用。
 

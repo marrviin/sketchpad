@@ -88,7 +88,7 @@ sketchpad snapshot                               # render PNG for agent self-rev
 sketchpad undo                                   # roll back
 ```
 
-The skill itself (the full creative workflow) lives at [`packages/cli/skill/SKILL.md`](packages/cli/skill/SKILL.md).
+The skill itself (the full creative workflow) lives at [`skills/sketchpad/SKILL.md`](skills/sketchpad/SKILL.md).
 
 **Daemon integration**: with [`@content-forge/daemon`](https://www.npmjs.com/package/@content-forge/daemon) installed, sketchpad auto-registers under `/project/<project>/sketchpad/`; without it, a local persistent server runs out of the box.
 

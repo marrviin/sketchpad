@@ -1,6 +1,6 @@
 {
   "name": "@content-forge/sketchpad",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "description": "手绘板：looseleaf Sketchpad 画板（手绘风页面 + REST/SSE 后端 + CLI），agent 作画、人实时观看",
   "license": "MIT",
   "type": "module",
@@ -12,7 +12,6 @@
     "dist/",
     "web-dist/",
     "fonts/",
-    "skill/",
     "README.md"
   ],
   "engines": {
